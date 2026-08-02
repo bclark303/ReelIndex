@@ -346,7 +346,7 @@ func install() error {
 func main() {
 	if msg(
 		"ReelIndex Setup",
-		"Install ReelIndex Movie Inventory "+appVersion+" (secure Windows package "+packageVersion+") for this Windows user?\n\nThis offline installer does not use PowerShell, download scripts, or access the network. Its embedded payload is verified with SHA-256 before installation.",
+		"Install ReelIndex Movie Inventory "+appVersion+" (secure Windows package "+packageVersion+") for this Windows user?\n\nThis offline installer does not run shell scripts, download files, or access the network. Its embedded payload is verified with SHA-256 before installation.",
 		0x44|0x20,
 	) != 6 {
 		return
