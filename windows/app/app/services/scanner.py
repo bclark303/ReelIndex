@@ -24,6 +24,7 @@ from app.core.database import SessionLocal
 from app.core.security import reveal_config
 from app.models import MediaFile, Movie, ScanRun, Source
 from app.services.deep_queue import deep_queue_store
+from app.services.library_identity import LibraryIdentityIndex, candidate_fingerprint
 from app.services.media_utils import sort_title
 from app.services.mediainfo import MediaInfoCancelled, analyze_media_quick
 from app.services.probe import ProbeCancelled, probe_media
@@ -441,15 +442,9 @@ class ScanManager:
             run.current_item = f"Indexing · 0/{len(candidates):,} movies"
             db.commit()
 
-            existing_movies = {
-                item.source_movie_id: item
-                for item in db.scalars(
-                    select(Movie)
-                    .options(selectinload(Movie.files))
-                    .where(Movie.source_id == source_id)
-                ).all()
-            }
-            seen_movie_ids: set[str] = set()
+            identity = LibraryIdentityIndex(db)
+            seen_movie_link_ids: set[str] = set()
+            seen_file_link_ids: set[str] = set()
             processed_files = 0
 
             for movie_index, candidate in enumerate(candidates, start=1):
@@ -465,7 +460,7 @@ class ScanManager:
                         total_movies=len(candidates),
                         files=len(candidate.files),
                     )
-                movie = existing_movies.get(candidate.source_movie_id)
+                movie, movie_link = identity.movie_for_candidate(source_id, candidate)
                 if not movie:
                     movie = Movie(
                         source_id=source_id,
@@ -475,7 +470,8 @@ class ScanManager:
                     )
                     db.add(movie)
                     db.flush()
-                seen_movie_ids.add(movie.id)
+                movie_link = identity.ensure_movie_link(movie, source_id, candidate.source_movie_id)
+                seen_movie_link_ids.add(movie_link.id)
                 movie.title = candidate.title
                 movie.sort_title = sort_title(candidate.title)
                 movie.year = candidate.year
@@ -497,8 +493,13 @@ class ScanManager:
                         merged_metadata[key] = existing_metadata[key]
                 movie.metadata_json = json.dumps(merged_metadata, default=str)
                 movie.active = True
+                identity.register_movie(movie)
 
-                destination = settings.data_dir / "posters" / source_id / f"{movie.id}.jpg"
+                destination = (
+                    Path(movie.poster_path)
+                    if movie.poster_path
+                    else settings.data_dir / "posters" / "library" / f"{movie.id}.jpg"
+                )
                 manual_poster = bool(merged_metadata.get("poster_locked"))
                 local_poster = candidate.metadata.get("origin") == "filesystem" and bool(candidate.poster_ref)
                 if manual_poster and destination.exists() and destination.stat().st_size > 100:
@@ -516,34 +517,41 @@ class ScanManager:
                 elif candidate.poster_ref or tmdb_token:
                     poster_jobs.append(PosterJob(movie.id, candidate.title, candidate, destination))
 
-                existing_files = {item.source_file_id: item for item in movie.files}
-                seen_file_ids: set[str] = set()
                 for file_candidate in candidate.files:
                     self._raise_if_cancelled(cancel_event)
-                    file_record = existing_files.get(file_candidate.source_file_id)
+                    file_record, file_link = identity.file_for_candidate(source_id, movie, file_candidate)
                     if not file_record:
                         file_record = MediaFile(
                             movie_id=movie.id,
                             source_file_id=file_candidate.source_file_id,
-                            path=file_candidate.path,
+                            path=str(file_candidate.local_path or file_candidate.path),
                             filename=file_candidate.filename,
                         )
                         db.add(file_record)
                         db.flush()
-                    seen_file_ids.add(file_record.id)
-                    same_fingerprint = file_record.fingerprint == file_candidate.fingerprint
+                    file_link = identity.ensure_file_link(
+                        file_record,
+                        source_id,
+                        file_candidate.source_file_id,
+                        file_candidate.path,
+                    )
+                    seen_file_link_ids.add(file_link.id)
+                    stable_fingerprint = candidate_fingerprint(file_candidate)
+                    same_fingerprint = file_record.fingerprint == stable_fingerprint
                     cached_valid = (
                         same_fingerprint
                         and not file_record.probe_error
                         and self._cached_analysis_satisfies(file_record.probe_json, mode)
                     )
-                    file_record.path = file_candidate.path
+                    if file_candidate.local_path or not file_record.path:
+                        file_record.path = str(file_candidate.local_path or file_candidate.path)
                     file_record.filename = file_candidate.filename
                     file_record.size_bytes = file_candidate.size_bytes
                     file_record.modified_ts = file_candidate.modified_ts
-                    file_record.fingerprint = file_candidate.fingerprint
+                    file_record.fingerprint = stable_fingerprint
                     file_record.edition = file_candidate.edition
                     file_record.active = True
+                    identity.register_file(file_record)
 
                     if mode == "posters":
                         # Poster-only refresh must never reopen or reanalyze media files.
@@ -595,18 +603,10 @@ class ScanManager:
                     if processed_files % settings.scan_commit_interval == 0:
                         db.commit()
 
-                for file_record in movie.files:
-                    if file_record.id not in seen_file_ids:
-                        file_record.active = False
-
                 if movie_index % settings.scan_commit_interval == 0:
                     db.commit()
 
-            for movie in existing_movies.values():
-                if movie.id not in seen_movie_ids:
-                    movie.active = False
-                    for file_record in movie.files:
-                        file_record.active = False
+            identity.deactivate_unseen(source_id, seen_movie_link_ids, seen_file_link_ids)
 
             run.current_item = (
                 f"Inventory ready · {len(candidates):,} movies / {total_files:,} files · "

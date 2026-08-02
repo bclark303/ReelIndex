@@ -30,9 +30,20 @@ if _is_sqlite:
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
+def _upgrade_library_identity() -> None:
+    # Imported lazily to avoid a database/session import cycle while models are
+    # being registered. The upgrade is idempotent and also consolidates legacy
+    # cross-source duplicates before the API starts serving requests.
+    from app.services.library_identity import upgrade_library_identity
+
+    with SessionLocal() as db:
+        upgrade_library_identity(db)
+
+
 def init_db() -> None:
     if not _is_sqlite:
         Base.metadata.create_all(bind=engine)
+        _upgrade_library_identity()
         return
 
     journal_mode = settings.sqlite_journal_mode.strip().upper()
@@ -63,6 +74,8 @@ def init_db() -> None:
                 "SQLite schema initialization is incomplete; missing tables: "
                 + ", ".join(missing_tables)
             )
+
+    _upgrade_library_identity()
 
 
 def get_db() -> Generator[Session, None, None]:

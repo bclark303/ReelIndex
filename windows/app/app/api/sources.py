@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import distinct, func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import protect_config, reveal_config, sanitize_config
-from app.models import Movie, ScanRun, Source
+from app.models import MovieSource, ScanRun, Source
 from app.schemas.api import ConnectionResult, ConnectionTest, SourceCreate, SourceOut, SourceUpdate
+from app.services.library_identity import detach_source
 from app.services.scheduler import scan_scheduler
 from app.sources.factory import create_adapter
 
@@ -17,7 +18,12 @@ router = APIRouter(prefix="/sources", tags=["sources"])
 
 
 def _source_out(db: Session, source: Source) -> SourceOut:
-    movie_count = db.scalar(select(func.count(Movie.id)).where(Movie.source_id == source.id, Movie.active.is_(True))) or 0
+    movie_count = db.scalar(
+        select(func.count(distinct(MovieSource.movie_id))).where(
+            MovieSource.source_id == source.id,
+            MovieSource.active.is_(True),
+        )
+    ) or 0
     last_scan = db.scalar(select(ScanRun).where(ScanRun.source_id == source.id).order_by(ScanRun.started_at.desc()).limit(1))
     return SourceOut(
         id=source.id,
@@ -89,8 +95,7 @@ def delete_source(source_id: str, db: Session = Depends(get_db)):
     source = db.get(Source, source_id)
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
-    db.delete(source)
-    db.commit()
+    detach_source(db, source)
     scan_scheduler.sync()
 
 
