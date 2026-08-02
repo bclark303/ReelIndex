@@ -214,3 +214,18 @@ def test_deep_scope_selection_uses_cached_failure_and_missing_fields():
     record.probe_error = None
     record.audio_channels = None
     assert ScanManager._should_queue_deep(record, candidate_obj, "missing", True)
+
+
+def test_deep_first_attempt_uses_short_timeout_and_retry_uses_standard(monkeypatch):
+    seen = []
+
+    def probe(*_args, profile="standard", timeout_override=None, **_kwargs):
+        seen.append((profile, timeout_override))
+        return complete_quick_result(), None
+
+    monkeypatch.setattr(scanner_module, "probe_media", probe)
+    ScanManager._analyze_file(candidate(), mode="deep", attempt_count=0)
+    ScanManager._analyze_file(candidate(), mode="deep", attempt_count=1)
+
+    assert seen[0] == ("standard", scanner_module.settings.deep_probe_initial_seconds)
+    assert seen[1] == ("standard", scanner_module.settings.deep_probe_standard_seconds)

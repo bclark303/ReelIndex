@@ -546,7 +546,7 @@ class ScanManager:
                         file_record, file_candidate, scope, same_fingerprint
                     ):
                         attempt_count = int(
-                            self._analysis_marker(file_record.probe_json).get("attempt_count") or 0
+                            self._deep_attempt_count(file_record.probe_json)
                         )
                         probe_jobs.append(
                             ProbeJob(
@@ -696,12 +696,12 @@ class ScanManager:
             ordered_ids = sorted(
                 (record_id for record_id in pending_ids if record_id in by_id),
                 key=lambda record_id: (
-                    int(self._analysis_marker(by_id[record_id].probe_json).get("attempt_count") or 0),
+                    int(self._deep_attempt_count(by_id[record_id].probe_json)),
                     original_position[record_id],
                 ),
             )
             attempt_counts = [
-                int(self._analysis_marker(by_id[record_id].probe_json).get("attempt_count") or 0)
+                int(self._deep_attempt_count(by_id[record_id].probe_json))
                 for record_id in ordered_ids
             ]
             minimum_attempts = min(attempt_counts, default=0)
@@ -727,7 +727,7 @@ class ScanManager:
                         record.filename,
                         candidate,
                         attempt_count=int(
-                            self._analysis_marker(record.probe_json).get("attempt_count") or 0
+                            self._deep_attempt_count(record.probe_json)
                         ),
                     )
                 )
@@ -829,33 +829,35 @@ class ScanManager:
             mode=mode,
         )
 
-        def container_priority(job: ProbeJob) -> tuple[int, int]:
+        def container_group(job: ProbeJob) -> str:
             suffix = Path(job.filename).suffix.lower()
-            if suffix in {".mp4", ".m4v", ".mov", ".avi"}:
-                rank = 0
-            elif suffix in {".mkv", ".webm"}:
-                rank = 1
-            elif suffix in {".ts", ".m2ts", ".mts", ".mpg", ".mpeg"}:
-                rank = 2
-            else:
-                rank = 1
+            if suffix in {".mp4", ".m4v", ".mov", ".avi", ".wmv"}:
+                return "fast"
+            if suffix in {".mkv", ".webm"}:
+                return "matroska"
+            if suffix in {".ts", ".m2ts", ".mts", ".mpg", ".mpeg"}:
+                return "transport"
+            return "other"
+
+        def container_priority(job: ProbeJob) -> tuple[int, int]:
+            rank = {"fast": 0, "matroska": 1, "other": 1, "transport": 2}[container_group(job)]
             return (max(0, int(job.attempt_count or 0)), rank)
+
+        def group_worker_limit(group: str | None) -> int:
+            if mode != "deep":
+                return workers
+            if group == "matroska":
+                return max(1, min(workers, int(settings.deep_probe_matroska_workers)))
+            if group == "transport":
+                return max(1, min(workers, int(settings.deep_probe_transport_workers)))
+            return workers
 
         ordered_jobs = sorted(jobs, key=container_priority) if mode == "deep" else list(jobs)
         if mode == "deep" and persistent_queue:
             deep_queue_store.keep_only(run_id, [job.record_id for job in ordered_jobs])
-            fast_count = sum(
-                Path(job.filename).suffix.lower() in {".mp4", ".m4v", ".mov", ".avi"}
-                for job in ordered_jobs
-            )
-            matroska_count = sum(
-                Path(job.filename).suffix.lower() in {".mkv", ".webm"}
-                for job in ordered_jobs
-            )
-            transport_count = sum(
-                Path(job.filename).suffix.lower() in {".ts", ".m2ts", ".mts", ".mpg", ".mpeg"}
-                for job in ordered_jobs
-            )
+            fast_count = sum(container_group(job) == "fast" for job in ordered_jobs)
+            matroska_count = sum(container_group(job) == "matroska" for job in ordered_jobs)
+            transport_count = sum(container_group(job) == "transport" for job in ordered_jobs)
             scan_event_store.append(
                 run_id,
                 "info",
@@ -872,20 +874,60 @@ class ScanManager:
         waiting = deque(ordered_jobs)
         futures: dict[Future[tuple[dict[str, Any], str | None]], ProbeJob] = {}
         submitted_at: dict[Future[tuple[dict[str, Any], str | None]], float] = {}
+        current_group: str | None = None
         active_limit = workers
-        healthy_streak = 0
         consecutive_timeouts = 0
         worker_reductions = 0
         worker_increases = 0
         pause_requested = False
         pause_after_timeouts = max(2, int(settings.deep_probe_pause_after_timeouts))
         ramp_after_successes = max(2, int(settings.deep_probe_ramp_successes))
+        health_window = max(ramp_after_successes, int(settings.deep_probe_health_window))
+        recent_health: deque[bool] = deque(maxlen=health_window)
+        container_stats: dict[str, dict[str, float | int]] = {}
+
+        def stats_for(job: ProbeJob) -> dict[str, float | int]:
+            suffix = Path(job.filename).suffix.lower().lstrip(".") or "other"
+            return container_stats.setdefault(
+                suffix,
+                {"attempted": 0, "succeeded": 0, "failed": 0, "timed_out": 0, "elapsed_seconds": 0.0},
+            )
+
+        def stats_payload() -> dict[str, dict[str, float | int]]:
+            payload: dict[str, dict[str, float | int]] = {}
+            for suffix, values in sorted(container_stats.items()):
+                attempted = int(values["attempted"])
+                elapsed_seconds = float(values["elapsed_seconds"])
+                payload[suffix] = {
+                    **values,
+                    "average_seconds": round(elapsed_seconds / attempted, 3) if attempted else 0.0,
+                }
+            return payload
 
         def can_submit() -> bool:
             return not cancel_event.is_set() and not pause_requested
 
         def submit_available() -> None:
+            nonlocal current_group, active_limit, consecutive_timeouts
+            if mode == "deep" and not futures and waiting:
+                next_group = container_group(waiting[0])
+                if next_group != current_group:
+                    current_group = next_group
+                    active_limit = group_worker_limit(current_group)
+                    consecutive_timeouts = 0
+                    recent_health.clear()
+                    scan_event_store.append(
+                        run_id,
+                        "info",
+                        "deep-queue",
+                        f"Deep probe profile switched to {current_group} · up to {active_limit} workers",
+                        container_group=current_group,
+                        active_workers=active_limit,
+                    )
+
             while waiting and len(futures) < active_limit and can_submit():
+                if mode == "deep" and current_group and container_group(waiting[0]) != current_group:
+                    break
                 job = waiting.popleft()
                 future = executor.submit(
                     self._analyze_file,
@@ -972,6 +1014,16 @@ class ScanManager:
                                 f"Analyzed {job.filename} with {source}",
                             )
 
+                        stat = stats_for(job)
+                        stat["attempted"] = int(stat["attempted"]) + 1
+                        stat["elapsed_seconds"] = float(stat["elapsed_seconds"]) + queued_elapsed
+                        if outcome == "succeeded":
+                            stat["succeeded"] = int(stat["succeeded"]) + 1
+                        elif outcome == "deferred":
+                            stat["timed_out"] = int(stat["timed_out"]) + 1
+                        else:
+                            stat["failed"] = int(stat["failed"]) + 1
+
                         if persistent_queue:
                             queue_state = deep_queue_store.mark_complete(
                                 run_id,
@@ -1022,20 +1074,35 @@ class ScanManager:
                                 queue_remaining=queue_remaining,
                                 active_workers=active_limit,
                             )
+                        if mode == "deep" and processed % 100 == 0:
+                            snapshot = stats_payload()
+                            summary_parts = [
+                                f"{suffix}: {int(values['succeeded']):,} ok / {int(values['timed_out']):,} timeout"
+                                for suffix, values in snapshot.items()
+                            ]
+                            scan_event_store.append(
+                                run_id,
+                                "info",
+                                "deep-queue",
+                                "Container checkpoint · " + "; ".join(summary_parts),
+                                container_stats=snapshot,
+                                active_workers=active_limit,
+                                container_group=current_group,
+                            )
                         if processed % settings.scan_commit_interval == 0:
                             db.commit()
 
                     if mode == "deep":
+                        recent_health.extend([True] * batch_responsive)
+                        recent_health.extend([False] * batch_timeouts)
                         if batch_responsive:
                             consecutive_timeouts = 0
-                            healthy_streak += batch_responsive
                         elif batch_timeouts:
                             consecutive_timeouts += batch_timeouts
-                            healthy_streak = 0
 
-                        # A complete timeout cluster lowers pressure immediately, but
-                        # never sleeps or launches an extra canary. Timed-out records
-                        # are already rotated behind untouched queue entries.
+                        # A complete timeout cluster lowers pressure immediately.
+                        # Group-specific caps keep Matroska at two workers and
+                        # transport streams at one even when the global pool is four.
                         if (
                             batch_timeouts
                             and not batch_responsive
@@ -1045,7 +1112,7 @@ class ScanManager:
                             previous_limit = active_limit
                             active_limit = max(1, active_limit // 2)
                             consecutive_timeouts = 0
-                            healthy_streak = 0
+                            recent_health.clear()
                             worker_reductions += 1
                             scan_event_store.append(
                                 run_id,
@@ -1058,33 +1125,43 @@ class ScanManager:
                                 previous_workers=previous_limit,
                                 active_workers=active_limit,
                                 worker_reductions=worker_reductions,
+                                container_group=current_group,
                             )
 
-                        # Once the source has been responsive for a sustained run,
-                        # cautiously restore parallelism. This prevents one early cold-
-                        # disk cluster from forcing the remaining library to run serially.
-                        if active_limit < workers and healthy_streak >= ramp_after_successes:
+                        # Recover based on a rolling response window rather than a
+                        # brittle consecutive-success streak. With the observed MKV
+                        # success rate, isolated bad files no longer pin the queue to
+                        # one worker for several minutes.
+                        current_cap = group_worker_limit(current_group)
+                        responsive_in_window = sum(1 for item in recent_health if item)
+                        timeout_in_window = len(recent_health) - responsive_in_window
+                        if (
+                            active_limit < current_cap
+                            and len(recent_health) >= ramp_after_successes
+                            and responsive_in_window >= ramp_after_successes
+                            and timeout_in_window <= max(1, len(recent_health) // 3)
+                        ):
                             previous_limit = active_limit
-                            active_limit = min(workers, active_limit * 2)
-                            healthy_streak = 0
+                            active_limit = min(current_cap, max(active_limit + 1, active_limit * 2))
+                            recent_health.clear()
                             worker_increases += 1
                             scan_event_store.append(
                                 run_id,
                                 "success",
                                 "ffprobe",
                                 (
-                                    f"Source remained responsive; increasing deep-scan concurrency "
-                                    f"from {previous_limit} to {active_limit} workers"
+                                    f"Source health recovered; increasing {current_group or 'deep'} "
+                                    f"concurrency from {previous_limit} to {active_limit} workers"
                                 ),
                                 previous_workers=previous_limit,
                                 active_workers=active_limit,
                                 worker_increases=worker_increases,
+                                container_group=current_group,
                             )
 
-                        # At serial concurrency, isolated file timeouts are ordinary
-                        # per-file failures. Pause only when several different files time
-                        # out consecutively, which is strong evidence that the share is
-                        # unavailable rather than that one container is slow.
+                        # At serial concurrency, pause only when several different
+                        # files time out consecutively. Responsive files reset this
+                        # counter, so isolated bad containers remain ordinary retries.
                         if active_limit == 1 and consecutive_timeouts >= pause_after_timeouts:
                             pause_requested = True
                             scan_event_store.append(
@@ -1097,12 +1174,12 @@ class ScanManager:
                                 ),
                                 consecutive_timeouts=consecutive_timeouts,
                                 pause_threshold=pause_after_timeouts,
+                                container_group=current_group,
                             )
 
-                        # When one member of an active batch times out, wait for the
-                        # rest of that batch to settle before filling the open slot.
-                        # This prevents four cold-disk timeouts from spawning several
-                        # replacement probes before the scheduler can lower pressure.
+                        # When every completed member of the active batch timed out,
+                        # let the rest of that already-submitted batch settle before
+                        # filling open slots and applying the reduced limit.
                         if batch_timeouts and not batch_responsive and futures:
                             continue
 
@@ -1123,6 +1200,33 @@ class ScanManager:
                 for future in futures:
                     future.cancel()
             executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
+            if cancelled and mode == "deep":
+                try:
+                    checkpoint_remaining = (
+                        deep_queue_store.info(run_id)["queue_remaining"]
+                        if persistent_queue
+                        else len(waiting) + len(futures)
+                    )
+                except Exception:
+                    checkpoint_remaining = len(waiting) + len(futures)
+                scan_event_store.append(
+                    run_id,
+                    "warning",
+                    "deep-queue",
+                    (
+                        f"Deep analysis checkpoint: {processed:,} attempted, "
+                        f"{succeeded:,} succeeded, {deferred:,} timed out, "
+                        f"{checkpoint_remaining:,} remaining"
+                    ),
+                    attempted=processed,
+                    succeeded=succeeded,
+                    failed=failed,
+                    deferred=deferred,
+                    remaining=checkpoint_remaining,
+                    active_workers=active_limit,
+                    container_group=current_group,
+                    container_stats=stats_payload(),
+                )
 
         remaining = (
             deep_queue_store.info(run_id)["queue_remaining"]
@@ -1157,6 +1261,8 @@ class ScanManager:
                 worker_reductions=worker_reductions,
                 worker_increases=worker_increases,
                 paused=paused,
+                container_group=current_group,
+                container_stats=stats_payload(),
             )
         return {
             "processed": processed,
@@ -1420,6 +1526,24 @@ class ScanManager:
             return {}
         marker = payload.get("_reelindex", {}) if isinstance(payload, dict) else {}
         return marker if isinstance(marker, dict) else {}
+
+    @staticmethod
+    def _deep_attempt_count(probe_json: str | None) -> int:
+        """Return actual deep-probe attempts, excluding prior Quick scans.
+
+        Older records only have a generic ``attempt_count`` that was incremented
+        by Quick scans too. For migration, a record whose latest analyzer mode is
+        deep counts as previously attempted; a Quick-only record is a first deep
+        attempt and receives the short initial timeout.
+        """
+        marker = ScanManager._analysis_marker(probe_json)
+        explicit = marker.get("deep_attempt_count")
+        if explicit is not None:
+            try:
+                return max(0, int(explicit))
+            except (TypeError, ValueError):
+                return 0
+        return 1 if str(marker.get("mode") or "").lower() == "deep" else 0
 
     @staticmethod
     def _should_queue_deep(
@@ -1731,6 +1855,8 @@ class ScanManager:
     @staticmethod
     def _apply_technical(record: MediaFile, technical: dict[str, Any], error: str | None) -> None:
         previous = ScanManager._analysis_marker(record.probe_json)
+        previous_deep_attempts = ScanManager._deep_attempt_count(record.probe_json)
+        analysis_mode = str(technical.get("analysis_mode") or "unknown").lower()
         record.container = technical.get("container")
         record.duration_seconds = technical.get("duration_seconds")
         record.video_codec = technical.get("video_codec")
@@ -1753,6 +1879,7 @@ class ScanManager:
                 "profile": technical.get("analysis_profile") or technical.get("probe_profile"),
                 "warning": technical.get("analysis_warning"),
                 "attempt_count": int(previous.get("attempt_count") or 0) + 1,
+                "deep_attempt_count": previous_deep_attempts + (1 if analysis_mode == "deep" else 0),
                 "attempted_at": utcnow().isoformat(),
             },
             "extended": technical.get("extended") or {},

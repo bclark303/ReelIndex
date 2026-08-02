@@ -99,8 +99,25 @@ def _probe_limits(path: Path, profile: ProbeProfile) -> tuple[str, str, int]:
     suffix = path.suffix.lower()
     transport = suffix in {".ts", ".m2ts", ".mts", ".mpg", ".mpeg"}
     if profile == "extended":
-        return ("96M" if transport else "64M", "40M" if transport else "25M", settings.deep_probe_retry_seconds)
-    return ("32M" if transport else "12M", "12M" if transport else "6M", settings.deep_probe_standard_seconds)
+        return (
+            "96M" if transport else "64M",
+            "40M" if transport else "25M",
+            settings.deep_probe_retry_seconds,
+        )
+
+    # Standard deep analysis only needs container and track headers. Matroska
+    # stores these near the beginning of the file, so a smaller bounded read is
+    # substantially friendlier to SMB shares than the previous generic 12M/6M
+    # limits. A successful-but-incomplete result can still escalate to extended.
+    if suffix in {".mkv", ".webm"}:
+        return ("4M", "2M", settings.deep_probe_standard_seconds)
+    if suffix in {".mp4", ".m4v", ".mov", ".avi", ".wmv"}:
+        return ("8M", "4M", settings.deep_probe_standard_seconds)
+    return (
+        "32M" if transport else "12M",
+        "12M" if transport else "6M",
+        settings.deep_probe_standard_seconds,
+    )
 
 
 def _show_entries(profile: ProbeProfile) -> str:

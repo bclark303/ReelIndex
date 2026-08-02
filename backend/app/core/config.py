@@ -17,8 +17,11 @@ class Settings(BaseSettings):
     deep_probe_standard_seconds: int = 8
     deep_probe_retry_seconds: int = 20
     deep_probe_pause_after_timeouts: int = 6
-    deep_probe_ramp_successes: int = 12
-    # Retained for compatibility with older environment files. v1.3.3 no longer
+    deep_probe_ramp_successes: int = 8
+    deep_probe_health_window: int = 12
+    deep_probe_matroska_workers: int = 2
+    deep_probe_transport_workers: int = 1
+    # Retained for compatibility with older environment files. v1.3.4 does not
     # sleeps or launches explicit recovery canaries between timeout clusters.
     deep_probe_recovery_attempts: int = 3
     deep_probe_recovery_delay_seconds: float = 2.0

@@ -127,9 +127,9 @@ def test_unreachable_source_pauses_after_bounded_timeouts(monkeypatch, tmp_path)
         run_id, jobs, threading.Event(), "deep", verbose=True, persistent_queue=True
     )
 
-    # Four initial workers, two reduced workers, then six serial timeouts.
-    assert len(calls) <= 12
-    assert len(calls) >= 10
+    # Matroska starts at two workers, then reduces to one and pauses after
+    # six serial timeouts. The bounded queue therefore touches only eight files.
+    assert len(calls) == 8
     assert result["paused"] is True
     assert result["deferred"] == len(calls)
     assert result["remaining"] == len(jobs)
@@ -207,7 +207,7 @@ def test_concurrency_recovers_after_healthy_streak(monkeypatch, tmp_path):
     assert result["worker_increases"] >= 1
     messages = [message for _, _, stage, message, _ in events.events if stage == "ffprobe"]
     assert any("reducing deep-scan concurrency" in message for message in messages)
-    assert any("increasing deep-scan concurrency" in message for message in messages)
+    assert any("increasing" in message and "concurrency" in message for message in messages)
 
 
 def test_deep_queue_prioritizes_fast_containers_and_lower_attempts(monkeypatch, tmp_path):
@@ -256,3 +256,45 @@ def test_deep_queue_prioritizes_fast_containers_and_lower_attempts(monkeypatch, 
         ("New.mkv", 0),
         ("Retry.mp4", 1),
     ]
+
+
+def test_matroska_group_never_exceeds_two_workers(monkeypatch, tmp_path):
+    run_id = "run-matroska-cap"
+    jobs, records = build_jobs(20, ".mkv")
+    run = SimpleNamespace(error_count=0, analyzed_count=0, current_item=None)
+    events = FakeEventStore()
+    configure(monkeypatch, tmp_path, run_id, jobs, records, run, events)
+    monkeypatch.setattr(scanner_module.settings, "deep_probe_matroska_workers", 2)
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def fake_analyze(candidate, cancel_event, mode, callback, verbose, media_circuit, probe_circuit, attempt_count=0):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return success_result()
+
+    monkeypatch.setattr(ScanManager, "_analyze_file", staticmethod(fake_analyze))
+    result = ScanManager()._run_probe_jobs(
+        run_id, jobs, threading.Event(), "deep", verbose=True, persistent_queue=True
+    )
+
+    assert result["succeeded"] == len(jobs)
+    assert maximum == 2
+    messages = [message for _, _, stage, message, _ in events.events if stage == "deep-queue"]
+    assert any("matroska" in message and "2 workers" in message for message in messages)
+
+
+def test_deep_attempt_count_excludes_quick_scan_history():
+    quick = '{"_reelindex":{"mode":"quick","attempt_count":7}}'
+    old_deep = '{"_reelindex":{"mode":"deep","attempt_count":2}}'
+    explicit = '{"_reelindex":{"mode":"quick","attempt_count":9,"deep_attempt_count":3}}'
+
+    assert ScanManager._deep_attempt_count(quick) == 0
+    assert ScanManager._deep_attempt_count(old_deep) == 1
+    assert ScanManager._deep_attempt_count(explicit) == 3

@@ -148,6 +148,11 @@ After a full worker batch times out, ReelIndex waits briefly and runs one serial
 
 Version 1.3.2 keeps a deep queue moving through isolated SMB/ffprobe timeout clusters. A timeout batch reduces concurrency and enters up to three serial recovery checks. Any responsive recovery file resumes the queue at a lower worker count; only repeated consecutive serial timeouts pause untouched work. Standard deep probes now use an eight-second limit, extended probes use twenty seconds, and technical-only deep scans reuse healthy cached local posters instead of copying them again.
 
-## Version 1.3.3 timeout rotation and fast-container priority
+## Version 1.3.4 timeout rotation and fast-container priority
 
-Version 1.3.3 removes per-timeout recovery sleeps and serial canary probes. Timed-out files are rotated behind untouched work, concurrency drops only after a full timeout cluster, and healthy runs cautiously restore parallelism. The queue prioritizes MP4/M4V/MOV/AVI before Matroska and transport-stream files, first attempts use a four-second timeout, retried files retain the eight-second timeout, and the queue pauses only after six consecutive serial timeouts.
+Version 1.3.4 removes per-timeout recovery sleeps and serial canary probes. Timed-out files are rotated behind untouched work, concurrency drops only after a full timeout cluster, and healthy runs cautiously restore parallelism. The queue prioritizes MP4/M4V/MOV/AVI before Matroska and transport-stream files, first attempts use a four-second timeout, retried files retain the eight-second timeout, and the queue pauses only after six consecutive serial timeouts.
+
+## Version 1.3.4 Matroska deep-scan tuning
+
+Version 1.3.4 separates Quick-scan history from actual Deep-probe attempts, so untouched files receive the intended four-second first-attempt timeout. Deep analysis now processes Matroska/WebM with a two-worker cap and a smaller header-read window, transport streams with one worker, and fast containers with the full global worker pool. Concurrency recovery uses a rolling health window rather than requiring a long uninterrupted success streak. Verbose logs include per-container checkpoints and a final checkpoint when the scan is cancelled.
+
