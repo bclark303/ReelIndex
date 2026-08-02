@@ -1,0 +1,67 @@
+name: Verify published v1.4.8
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/verify-published-v1.4.8.yml
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull and validate published image
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..60}; do
+            echo "Registry verification attempt ${attempt}/60"
+            docker pull ghcr.io/bclark303/reelindex:latest || true
+            docker rm --force reelindex-published >/dev/null 2>&1 || true
+            docker run --detach --name reelindex-published \
+              --publish 18081:8080 \
+              --env PUID="$(id -u)" --env PGID="$(id -g)" \
+              ghcr.io/bclark303/reelindex:latest >/dev/null
+
+            healthy=false
+            for _ in {1..45}; do
+              if curl --fail --silent --show-error \
+                --output health.json http://127.0.0.1:18081/api/health; then
+                healthy=true
+                break
+              fi
+              if [[ "$(docker inspect --format '{{.State.Running}}' reelindex-published 2>/dev/null || true)" != "true" ]]; then
+                break
+              fi
+              sleep 1
+            done
+
+            if [[ "$healthy" == true ]] && python - <<'PY'
+          import json
+          payload = json.load(open('health.json', encoding='utf-8'))
+          print(payload)
+          raise SystemExit(0 if payload.get('version') == '1.4.8' else 1)
+          PY
+            then
+              docker exec reelindex-published python - <<'PY'
+          import sqlite3
+          db = sqlite3.connect('/data/reelindex.db')
+          tables = {row[0] for row in db.execute("select name from sqlite_master where type='table'")}
+          required = {'movies', 'movie_sources', 'media_files', 'media_file_sources'}
+          missing = required - tables
+          assert not missing, missing
+          PY
+              docker rm --force reelindex-published >/dev/null
+              echo "Published latest image is ReelIndex 1.4.8."
+              exit 0
+            fi
+
+            docker logs reelindex-published || true
+            docker rm --force reelindex-published >/dev/null 2>&1 || true
+            sleep 10
+          done
+          echo "ghcr.io/bclark303/reelindex:latest did not become v1.4.8 in time." >&2
+          exit 1
