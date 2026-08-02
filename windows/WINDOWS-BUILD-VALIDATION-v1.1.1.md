@@ -7,10 +7,11 @@
 - Added Kodi/Jellyfin NFO parsing for title, year, runtime, overview, edition, tagline, and unique IDs.
 - Added generic and filename-matched JSON sidecar parsing.
 - Avoided assigning a generic folder poster to every movie in a flat multi-movie directory.
+- Local sidecar artwork replaces an older cached online poster during a rescan.
 
 ## Validation
 
-- Backend test suite: 9 passed.
+- Backend test suite: 10 passed.
 - Python bytecode compilation: passed.
 - NFO metadata and filename-matched WebP poster test: passed.
 - Flat-folder per-file metadata/artwork isolation test: passed.

@@ -52,6 +52,10 @@ class FilesystemAdapter:
 
         while pending:
             directory = pending.pop()
+            if progress:
+                # Besides updating the live location, this gives the scan manager
+                # a cancellation checkpoint even in trees containing empty folders.
+                progress(len(grouped), discovered_files, directory)
             try:
                 with os.scandir(directory) as iterator:
                     entries = list(iterator)

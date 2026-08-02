@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -44,18 +46,47 @@ def _hidden_process_options() -> dict[str, Any]:
     }
 
 
-def _run_hidden(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+class ProbeCancelled(RuntimeError):
+    """Raised when an active ffprobe process is cancelled by the scan manager."""
+
+
+def _run_hidden(
+    command: list[str],
+    timeout: int,
+    cancel_event: threading.Event | None = None,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
         command,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
-        check=False,
         **_hidden_process_options(),
     )
+    deadline = time.monotonic() + timeout
+    try:
+        while process.poll() is None:
+            if cancel_event and cancel_event.is_set():
+                process.kill()
+                process.communicate()
+                raise ProbeCancelled("ffprobe cancelled")
+            if time.monotonic() >= deadline:
+                process.kill()
+                stdout, stderr = process.communicate()
+                raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+            time.sleep(0.1)
+        stdout, stderr = process.communicate()
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+        raise
 
 
-def probe_media(path: Path) -> tuple[dict[str, Any], str | None]:
+def probe_media(
+    path: Path,
+    cancel_event: threading.Event | None = None,
+) -> tuple[dict[str, Any], str | None]:
     command = [
         settings.ffprobe_path,
         "-v",
@@ -67,7 +98,7 @@ def probe_media(path: Path) -> tuple[dict[str, Any], str | None]:
         str(path),
     ]
     try:
-        result = _run_hidden(command, settings.max_probe_seconds)
+        result = _run_hidden(command, settings.max_probe_seconds, cancel_event)
     except FileNotFoundError:
         return {}, "ffprobe is not installed"
     except subprocess.TimeoutExpired:

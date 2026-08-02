@@ -42,6 +42,18 @@ def start_scan(source_id: str, db: Session = Depends(get_db)):
     return _out(run, source.name)
 
 
+@router.post("/{run_id}/cancel", response_model=ScanRunOut, status_code=status.HTTP_202_ACCEPTED)
+def cancel_scan(run_id: str, db: Session = Depends(get_db)):
+    run = db.get(ScanRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if not scan_manager.cancel(run_id):
+        raise HTTPException(status_code=409, detail="Scan is no longer running")
+    db.refresh(run)
+    source = db.get(Source, run.source_id)
+    return _out(run, source.name if source else None)
+
+
 @router.get("", response_model=list[ScanRunOut])
 def list_scans(limit: int = 30, db: Session = Depends(get_db)):
     runs = db.scalars(select(ScanRun).order_by(ScanRun.started_at.desc()).limit(min(max(limit, 1), 100))).all()

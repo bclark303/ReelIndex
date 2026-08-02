@@ -103,3 +103,8 @@ For a mapped network drive, ReelIndex must be launched under the same Windows ac
 - The Library and Sources pages refresh during active scans, so results appear progressively.
 
 The first filesystem scan still has to read every directory and inspect every media file. Later scans reuse cached technical metadata whenever file size and modification time have not changed.
+
+
+## Scan cancellation in version 1.1.2
+
+Active scans can be cancelled from the progress banner or from the Sources page. ReelIndex stops discovery, pending media analysis, and pending poster work, terminates active ffprobe processes, and records the run as cancelled. Movies already indexed before cancellation remain available; media files are never modified.

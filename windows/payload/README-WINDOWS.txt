@@ -104,9 +104,7 @@ For a mapped network drive, ReelIndex must be launched under the same Windows ac
 
 The first filesystem scan still has to read every directory and inspect every media file. Later scans reuse cached technical metadata whenever file size and modification time have not changed.
 
-Version 1.1.1
-- Runs ffprobe with Windows CREATE_NO_WINDOW/hidden startup flags, preventing a console window for each movie.
-- Recognizes local poster, folder, cover, movie, front, and thumb artwork in JPG, JPEG, PNG, and WebP formats.
-- Recognizes filename-matched artwork such as Movie-poster.jpg and Movie.poster.png.
-- Reads movie.nfo and filename-matched Kodi/Jellyfin NFO sidecars for title, year, runtime, plot, edition, and unique IDs.
-- Reads movie.json, metadata.json, and filename-matched JSON sidecars.
+
+## Scan cancellation in version 1.1.2
+
+Active scans can be cancelled from the progress banner or from the Sources page. ReelIndex stops discovery, pending media analysis, and pending poster work, terminates active ffprobe processes, and records the run as cancelled. Movies already indexed before cancellation remain available; media files are never modified.
