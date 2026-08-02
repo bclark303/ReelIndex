@@ -91,3 +91,15 @@ Application log:
 ```
 
 For a mapped network drive, ReelIndex must be launched under the same Windows account that owns the drive mapping. A UNC path is usually more dependable for network shares.
+
+## Scan performance in version 1.1
+
+- Directory discovery reuses Windows directory-entry metadata instead of reopening each folder for every movie file.
+- Movie and file counts update while discovery is still running.
+- The inventory is committed before technical analysis and poster enrichment finish.
+- Up to four changed files are analyzed concurrently by default.
+- Plex, Jellyfin, and Emby technical metadata is used directly instead of reopening mapped network files with `ffprobe`.
+- Poster retrieval uses up to six concurrent workers.
+- The Library and Sources pages refresh during active scans, so results appear progressively.
+
+The first filesystem scan still has to read every directory and inspect every media file. Later scans reuse cached technical metadata whenever file size and modification time have not changed.

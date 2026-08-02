@@ -6,7 +6,7 @@ from urllib.parse import urljoin
 import httpx
 
 from app.services.media_utils import map_remote_path, resolution_label
-from app.sources.base import AdapterConnectionResult, FileCandidate, MovieCandidate
+from app.sources.base import AdapterConnectionResult, DiscoveryCallback, FileCandidate, MovieCandidate
 
 
 class JellyfinAdapter:
@@ -48,7 +48,7 @@ class JellyfinAdapter:
         except Exception as exc:
             return AdapterConnectionResult(False, f"{self.server_type.title()} connection failed: {exc}")
 
-    def scan(self) -> list[MovieCandidate]:
+    def scan(self, progress: DiscoveryCallback | None = None) -> list[MovieCandidate]:
         params = {
             "Recursive": "true",
             "IncludeItemTypes": "Movie",
@@ -62,6 +62,7 @@ class JellyfinAdapter:
         endpoint = f"/Users/{self.user_id}/Items" if self.user_id else "/Items"
         items = self._get(endpoint, params=params).json().get("Items", [])
         movies: list[MovieCandidate] = []
+        discovered_files = 0
         for item in items:
             item_id = item.get("Id")
             if not item_id:
@@ -113,6 +114,9 @@ class JellyfinAdapter:
                     )
                 )
             movies.append(candidate)
+            discovered_files += len(candidate.files)
+            if progress:
+                progress(len(movies), discovered_files, candidate.title)
         return movies
 
     def fetch_poster(self, candidate: MovieCandidate, destination: Path) -> bool:

@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 import httpx
 
 from app.services.media_utils import map_remote_path, resolution_label
-from app.sources.base import AdapterConnectionResult, FileCandidate, MovieCandidate
+from app.sources.base import AdapterConnectionResult, DiscoveryCallback, FileCandidate, MovieCandidate
 
 
 class PlexAdapter:
@@ -43,12 +43,13 @@ class PlexAdapter:
         except Exception as exc:
             return AdapterConnectionResult(False, f"Plex connection failed: {exc}")
 
-    def scan(self) -> list[MovieCandidate]:
+    def scan(self, progress: DiscoveryCallback | None = None) -> list[MovieCandidate]:
         if not self.library_id:
             raise ValueError("A Plex movie library must be selected")
         response = self._get(f"/library/sections/{self.library_id}/all?type=1&includeGuids=1")
         root = ET.fromstring(response.text)
         movies: list[MovieCandidate] = []
+        discovered_files = 0
         for video in root.findall("Video"):
             rating_key = video.attrib.get("ratingKey")
             if not rating_key:
@@ -96,6 +97,9 @@ class PlexAdapter:
                         )
                     )
             movies.append(candidate)
+            discovered_files += len(candidate.files)
+            if progress:
+                progress(len(movies), discovered_files, candidate.title)
         return movies
 
     def fetch_poster(self, candidate: MovieCandidate, destination: Path) -> bool:

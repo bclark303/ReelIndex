@@ -8,7 +8,7 @@
   const state = {
     page: (location.hash.replace('#','') || 'library'), sources: [], scans: [], view: localStorage.getItem('reelindex-view') || 'grid',
     query: {sort:'title', direction:'asc', page:1, page_size:100}, searchDraft:'', movies:null, stats:null, diagnostics:null, loading:false,
-    sourceModal:null, selectedMovie:null, pollTimer:null
+    sourceModal:null, selectedMovie:null, pollTimer:null, lastActiveRefresh:0
   };
 
   const icons = {
@@ -59,9 +59,9 @@
   function renderScanPanel(){
     const active=state.scans.filter(s=>s.status==='queued'||s.status==='running');
     if(!active.length){scanPanel.innerHTML='';return;}
-    scanPanel.innerHTML=`<div class="scan-panel">${active.map(s=>{const total=Math.max(s.discovered_count||0,1);const done=(s.analyzed_count||0)+(s.cached_count||0)+(s.error_count||0);const pct=Math.min(100,Math.round(done/total*100));return `<div class="scan-row"><div class="scan-icon">${icon('refresh',20,'spin')}</div><div class="scan-content"><div class="scan-copy"><strong>${esc(s.source_name||'Library scan')}</strong><span>${esc(s.current_item||s.status)}</span></div><div class="progress-track"><span style="width:${pct}%"></span></div><div class="scan-counts"><span>${s.discovered_count} found</span><span>${s.analyzed_count} analyzed · ${s.cached_count} cached · ${s.error_count} errors</span></div></div></div>`}).join('')}</div>`;
+    scanPanel.innerHTML=`<div class="scan-panel">${active.map(s=>{const total=Math.max(s.discovered_count||0,1);const done=(s.analyzed_count||0)+(s.cached_count||0)+(s.error_count||0);const pct=Math.min(100,Math.round(done/total*100));return `<div class="scan-row"><div class="scan-icon">${icon('refresh',20,'spin')}</div><div class="scan-content"><div class="scan-copy"><strong>${esc(s.source_name||'Library scan')}</strong><span>${esc(s.current_item||s.status)}</span></div><div class="progress-track"><span style="width:${pct}%"></span></div><div class="scan-counts"><span>${s.discovered_count} files found</span><span>${s.analyzed_count} analyzed · ${s.cached_count} cached · ${s.error_count} errors</span></div></div></div>`}).join('')}</div>`;
   }
-  function schedulePoll(){ clearTimeout(state.pollTimer); const active=state.scans.some(s=>s.status==='queued'||s.status==='running'); state.pollTimer=setTimeout(async()=>{const before=state.scans.map(s=>s.id+':'+s.status).join('|');await loadScans();const after=state.scans.map(s=>s.id+':'+s.status).join('|');if(before!==after&&state.page==='library')loadLibrary();if(before!==after&&state.page==='sources'){await loadSources();renderSources();}schedulePoll();},active?1500:10000); }
+  function schedulePoll(){ clearTimeout(state.pollTimer); const active=state.scans.some(s=>s.status==='queued'||s.status==='running'); state.pollTimer=setTimeout(async()=>{const before=state.scans.map(s=>s.id+':'+s.status).join('|');await loadScans();const after=state.scans.map(s=>s.id+':'+s.status).join('|');const stillActive=state.scans.some(s=>s.status==='queued'||s.status==='running');const statusChanged=before!==after;const now=Date.now();const refreshActive=stillActive&&now-state.lastActiveRefresh>=5000;if((statusChanged||refreshActive)&&state.page==='library'){state.lastActiveRefresh=now;loadLibrary();}if((statusChanged||refreshActive)&&state.page==='sources'){state.lastActiveRefresh=now;await loadSources();renderSources();}schedulePoll();},active?1500:10000); }
 
   async function renderPage(){
     document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===state.page));

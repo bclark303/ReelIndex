@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
@@ -55,12 +55,10 @@ def list_movies(
     page_size: int = Query(default=48, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    stmt = select(Movie).options(selectinload(Movie.files), selectinload(Movie.source)).where(Movie.active.is_(True))
-    conditions = []
+    conditions = [Movie.active.is_(True)]
     if search:
         terms = [term.strip() for term in search.split() if term.strip()]
-        for term in terms:
-            conditions.append(Movie.title.ilike(f"%{term}%"))
+        conditions.extend(Movie.title.ilike(f"%{term}%") for term in terms)
     if source_id:
         conditions.append(Movie.source_id == source_id)
     if missing_poster is True:
@@ -77,29 +75,58 @@ def list_movies(
             file_conditions.append(MediaFile.probe_error.is_not(None))
         conditions.append(select(MediaFile.id).where(and_(*file_conditions)).exists())
     if multiple_versions is True:
-        conditions.append(select(func.count(MediaFile.id)).where(MediaFile.movie_id == Movie.id, MediaFile.active.is_(True)).scalar_subquery() > 1)
-    if conditions:
-        stmt = stmt.where(and_(*conditions))
+        conditions.append(
+            select(func.count(MediaFile.id))
+            .where(MediaFile.movie_id == Movie.id, MediaFile.active.is_(True))
+            .scalar_subquery()
+            > 1
+        )
 
-    movies = db.scalars(stmt).unique().all()
+    total = db.scalar(select(func.count(Movie.id)).where(and_(*conditions))) or 0
+    stmt = (
+        select(Movie)
+        .options(selectinload(Movie.files), selectinload(Movie.source))
+        .where(and_(*conditions))
+    )
+
     if sort == "year":
-        key = lambda item: (item.year or 0, item.title.lower())
-    elif sort == "size":
-        key = lambda item: (sum(file.size_bytes or 0 for file in item.files if file.active), item.title.lower())
+        order_columns = [func.coalesce(Movie.year, 0), Movie.sort_title]
     elif sort == "updated":
-        key = lambda item: (item.updated_at, item.title.lower())
+        order_columns = [Movie.updated_at, Movie.sort_title]
+    elif sort == "size":
+        size_value = (
+            select(func.coalesce(func.sum(MediaFile.size_bytes), 0))
+            .where(MediaFile.movie_id == Movie.id, MediaFile.active.is_(True))
+            .scalar_subquery()
+        )
+        order_columns = [size_value, Movie.sort_title]
     else:
-        key = lambda item: item.sort_title
-    movies.sort(key=key, reverse=direction == "desc")
+        order_columns = [Movie.sort_title]
 
-    total = len(movies)
-    start = (page - 1) * page_size
-    items = [_list_item(movie, movie.source) for movie in movies[start : start + page_size]]
-    active_files = db.scalars(select(MediaFile).where(MediaFile.active.is_(True))).all()
+    order = [column.desc() if direction == "desc" else column.asc() for column in order_columns]
+    stmt = stmt.order_by(*order).offset((page - 1) * page_size).limit(page_size)
+    movies = db.scalars(stmt).unique().all()
+    items = [_list_item(movie, movie.source) for movie in movies]
+
     facets = {
-        "resolutions": sorted({item.resolution_label for item in active_files if item.resolution_label}),
-        "codecs": sorted({item.video_codec for item in active_files if item.video_codec}),
-        "containers": sorted({item.container for item in active_files if item.container}),
+        "resolutions": db.scalars(
+            select(MediaFile.resolution_label)
+            .where(MediaFile.active.is_(True), MediaFile.resolution_label.is_not(None))
+            .distinct()
+            .order_by(MediaFile.resolution_label)
+        ).all(),
+        "codecs": db.scalars(
+            select(MediaFile.video_codec)
+            .where(MediaFile.active.is_(True), MediaFile.video_codec.is_not(None))
+            .distinct()
+            .order_by(MediaFile.video_codec)
+        ).all(),
+        "containers": db.scalars(
+            select(MediaFile.container)
+            .where(MediaFile.active.is_(True), MediaFile.container.is_not(None))
+            .distinct()
+            .order_by(MediaFile.container)
+        ).all(),
     }
     return PaginatedMovies(items=items, total=total, page=page, page_size=page_size, facets=facets)
 
@@ -150,18 +177,32 @@ def get_movie(movie_id: str, db: Session = Depends(get_db)):
 @router.get("/stats", response_model=DashboardStats)
 def stats(db: Session = Depends(get_db)):
     movies = db.scalar(select(func.count(Movie.id)).where(Movie.active.is_(True))) or 0
-    files = db.scalars(select(MediaFile).where(MediaFile.active.is_(True))).all()
     source_count = db.scalar(select(func.count(Source.id)).where(Source.enabled.is_(True))) or 0
-    resolution_counts: dict[str, int] = {}
-    for file in files:
-        if file.resolution_label:
-            resolution_counts[file.resolution_label] = resolution_counts.get(file.resolution_label, 0) + 1
+    files, total_size, probe_errors = db.execute(
+        select(
+            func.count(MediaFile.id),
+            func.coalesce(func.sum(MediaFile.size_bytes), 0),
+            func.count(MediaFile.probe_error),
+        ).where(MediaFile.active.is_(True))
+    ).one()
+    resolution_counts = {
+        label: count
+        for label, count in db.execute(
+            select(MediaFile.resolution_label, func.count(MediaFile.id))
+            .where(MediaFile.active.is_(True), MediaFile.resolution_label.is_not(None))
+            .group_by(MediaFile.resolution_label)
+        ).all()
+    }
     return DashboardStats(
         movies=movies,
-        files=len(files),
-        total_size_bytes=sum(item.size_bytes or 0 for item in files),
-        missing_posters=db.scalar(select(func.count(Movie.id)).where(Movie.active.is_(True), Movie.poster_path.is_(None))) or 0,
-        probe_errors=sum(1 for item in files if item.probe_error),
+        files=files or 0,
+        total_size_bytes=total_size or 0,
+        missing_posters=db.scalar(
+            select(func.count(Movie.id)).where(Movie.active.is_(True), Movie.poster_path.is_(None))
+        )
+        or 0,
+        probe_errors=probe_errors or 0,
         sources=source_count,
         resolutions=resolution_counts,
     )
+

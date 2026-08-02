@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections import defaultdict
 from pathlib import Path
 
 from app.core.config import settings
 from app.services.media_utils import clean_title, normalized_movie_key, stable_id
-from app.sources.base import AdapterConnectionResult, FileCandidate, MovieCandidate
+from app.sources.base import AdapterConnectionResult, DiscoveryCallback, FileCandidate, MovieCandidate
 
 
 class FilesystemAdapter:
@@ -21,94 +20,148 @@ class FilesystemAdapter:
 
     def test_connection(self) -> AdapterConnectionResult:
         if not self.root.exists():
-            return AdapterConnectionResult(False, f"Path does not exist inside the container: {self.root}")
+            return AdapterConnectionResult(False, f"Path does not exist: {self.root}")
         if not self.root.is_dir():
             return AdapterConnectionResult(False, f"Path is not a directory: {self.root}")
         try:
             next(self.root.iterdir(), None)
         except PermissionError:
             return AdapterConnectionResult(False, f"Permission denied: {self.root}")
-        return AdapterConnectionResult(True, f"Readable media path: {self.root}", [{"id": str(self.root), "name": self.root.name or str(self.root)}])
+        return AdapterConnectionResult(
+            True,
+            f"Readable media path: {self.root}",
+            [{"id": str(self.root), "name": self.root.name or str(self.root)}],
+        )
 
-    def scan(self) -> list[MovieCandidate]:
+    def scan(self, progress: DiscoveryCallback | None = None) -> list[MovieCandidate]:
+        """Scan using one directory enumeration per folder.
+
+        ``os.walk`` already uses scandir internally, but the old implementation threw
+        away DirEntry objects and then issued additional ``stat`` and directory-listing
+        calls for every media file. That is especially expensive over SMB. This walker
+        reuses DirEntry metadata, determines folder layout once, and never resolves each
+        path against the network filesystem.
+        """
         grouped: dict[str, MovieCandidate] = {}
-        for dirpath, dirnames, filenames in os.walk(self.root, followlinks=self.follow_symlinks):
-            dirnames[:] = [name for name in dirnames if not name.startswith(".")]
-            for filename in filenames:
-                path = Path(dirpath) / filename
-                if path.suffix.lower() not in self.extensions:
+        pending = [os.fspath(self.root)]
+        discovered_files = 0
+
+        while pending:
+            directory = pending.pop()
+            try:
+                with os.scandir(directory) as iterator:
+                    entries = list(iterator)
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+
+            media_entries: list[os.DirEntry[str]] = []
+            file_lookup: dict[str, os.DirEntry[str]] = {}
+
+            for entry in entries:
+                if entry.name.startswith("."):
                     continue
                 try:
-                    stat = path.stat()
+                    if entry.is_dir(follow_symlinks=self.follow_symlinks):
+                        if self.follow_symlinks or not entry.is_symlink():
+                            pending.append(entry.path)
+                        continue
+                    if not entry.is_file(follow_symlinks=self.follow_symlinks):
+                        continue
+                except OSError:
+                    continue
+
+                file_lookup[entry.name.lower()] = entry
+                if Path(entry.name).suffix.lower() in self.extensions:
+                    media_entries.append(entry)
+
+            folder_is_movie = len(media_entries) <= 3
+            folder_name = Path(directory).name
+            nfo = self._read_nfo_json_from_lookup(file_lookup)
+
+            for entry in media_entries:
+                try:
+                    stat = entry.stat(follow_symlinks=self.follow_symlinks)
                 except (FileNotFoundError, PermissionError, OSError):
                     continue
 
-                raw_title_source = path.parent.name if self._folder_is_movie(path.parent, path) else path.name
+                path = Path(entry.path)
+                raw_title_source = folder_name if folder_is_movie else entry.name
                 title, year, folder_edition = clean_title(raw_title_source)
-                _, _, file_edition = clean_title(path.name)
+                _, _, file_edition = clean_title(entry.name)
                 edition = file_edition or folder_edition
                 key = normalized_movie_key(title, year)
                 movie = grouped.get(key)
+
                 if not movie:
-                    poster = self._find_local_poster(path.parent, path.stem)
-                    nfo = self._read_nfo_json(path.parent)
+                    poster = self._find_local_poster_from_lookup(file_lookup, path.stem)
                     movie = MovieCandidate(
                         source_movie_id=stable_id(key),
                         title=nfo.get("title") or title,
                         year=nfo.get("year") or year,
                         runtime_seconds=nfo.get("runtime_seconds"),
                         overview=nfo.get("overview"),
-                        poster_ref=str(poster) if poster else None,
+                        poster_ref=os.fspath(poster) if poster else None,
                         metadata={"origin": "filesystem", **nfo},
                     )
                     grouped[key] = movie
+
+                # abspath/normcase are lexical operations. Path.resolve() may perform
+                # expensive network lookups for every file on Windows/SMB.
+                stable_path = os.path.normcase(os.path.abspath(entry.path))
                 movie.files.append(
                     FileCandidate(
-                        source_file_id=stable_id(str(path.resolve())),
-                        path=str(path),
-                        filename=filename,
+                        source_file_id=stable_id(stable_path),
+                        path=os.fspath(path),
+                        filename=entry.name,
                         local_path=path,
                         size_bytes=stat.st_size,
                         modified_ts=stat.st_mtime,
                         edition=edition,
                     )
                 )
+                discovered_files += 1
+                if progress:
+                    progress(len(grouped), discovered_files, directory)
+
         return sorted(grouped.values(), key=lambda movie: (movie.title.lower(), movie.year or 0))
 
     def fetch_poster(self, candidate: MovieCandidate, destination: Path) -> bool:
         if not candidate.poster_ref:
             return False
         source = Path(candidate.poster_ref)
-        if not source.exists():
-            return False
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        return True
-
-    def _folder_is_movie(self, folder: Path, current: Path) -> bool:
         try:
-            media = [item for item in folder.iterdir() if item.is_file() and item.suffix.lower() in self.extensions]
-        except (PermissionError, OSError):
+            if not source.is_file():
+                return False
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            return True
+        except OSError:
             return False
-        return len(media) <= 3 and current in media
 
     @staticmethod
-    def _find_local_poster(folder: Path, stem: str) -> Path | None:
-        names = ["poster.jpg", "poster.jpeg", "poster.png", "folder.jpg", "cover.jpg", f"{stem}.jpg", f"{stem}.png"]
+    def _find_local_poster_from_lookup(file_lookup: dict[str, os.DirEntry[str]], stem: str) -> Path | None:
+        names = [
+            "poster.jpg",
+            "poster.jpeg",
+            "poster.png",
+            "folder.jpg",
+            "cover.jpg",
+            f"{stem}.jpg",
+            f"{stem}.png",
+        ]
         for name in names:
-            candidate = folder / name
-            if candidate.exists() and candidate.is_file():
-                return candidate
+            entry = file_lookup.get(name.lower())
+            if entry:
+                return Path(entry.path)
         return None
 
     @staticmethod
-    def _read_nfo_json(folder: Path) -> dict:
-        # Optional lightweight sidecar supported for local testing and portability.
-        path = folder / "movie.json"
-        if not path.exists():
+    def _read_nfo_json_from_lookup(file_lookup: dict[str, os.DirEntry[str]]) -> dict:
+        entry = file_lookup.get("movie.json")
+        if not entry:
             return {}
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(Path(entry.path).read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else {}
         except (OSError, json.JSONDecodeError):
             return {}
