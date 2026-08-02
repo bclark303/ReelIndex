@@ -13,7 +13,7 @@
   <Category>MediaApp:Video Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL/>
-  <Icon/>
+  <Icon>file:///boot/config/plugins/dockerMan/images/reelindex-icon.png</Icon>
   <ExtraParams>--stop-timeout 30</ExtraParams>
   <PostArgs/>
   <CPUset/>
@@ -34,5 +34,5 @@
   <Config Name="ffprobe Timeout" Target="REELINDEX_MAX_PROBE_SECONDS" Default="45" Mode="" Description="Maximum number of seconds allowed for each ffprobe operation." Type="Variable" Display="advanced-hide" Required="true" Mask="false">45</Config>
   <Config Name="Allowed Extensions" Target="REELINDEX_ALLOWED_EXTENSIONS" Default=".mkv,.mp4,.m4v,.avi,.mov,.wmv,.ts,.m2ts,.webm,.mpg,.mpeg" Mode="" Description="Comma-separated video file extensions included in filesystem scans." Type="Variable" Display="advanced-hide" Required="true" Mask="false">.mkv,.mp4,.m4v,.avi,.mov,.wmv,.ts,.m2ts,.webm,.mpg,.mpeg</Config>
   <TailscaleStateDir/>
-  <Changes>### 2026.07.30&#xD;&#xA;- Initial Unraid all-in-one image and local Docker template.&#xD;&#xA;- Read-only movie mapping and persistent appdata mapping.&#xD;&#xA;- Configurable PUID, PGID, timezone, TMDB token, logging, and ffprobe timeout.</Changes>
+  <Changes>### 2026.07.31&#xD;&#xA;- Added ReelIndex icon for the Unraid Docker page and browser tab.&#xD;&#xA;- Added favicon, Apple touch icon, and web app manifest.&#xD;&#xA;&#xD;&#xA;### 2026.07.30&#xD;&#xA;- Initial Unraid all-in-one image and local Docker template.&#xD;&#xA;- Read-only movie mapping and persistent appdata mapping.&#xD;&#xA;- Configurable PUID, PGID, timezone, TMDB token, logging, and ffprobe timeout.</Changes>
 </Container>

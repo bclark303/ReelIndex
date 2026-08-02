@@ -67,3 +67,7 @@ The movie mapping remains read-only and is never modified by ReelIndex.
 ## Registry-ready template
 
 The included `my-ReelIndex.xml` uses the local image name `reelindex:unraid`. Once the image is published to Docker Hub or GHCR, replace the `<Repository>` value with the published image name and optionally populate `<Registry>`, `<Project>`, `<Support>`, `<TemplateURL>`, and `<Icon>` for Community Applications distribution.
+
+## ReelIndex icon
+
+The installer copies `reelindex-icon.png` to the persistent Unraid Docker icon directory and references it from the template. The same artwork is built into the web interface as the favicon, Apple touch icon, and web app icon. If an older blank icon remains cached, refresh the Docker page after recreating the container.
