@@ -10,18 +10,31 @@ browser interface.
 
 ![ReelIndex library](docs/images/library.png)
 
-## Windows download temporarily quarantined
+## Download for Windows
 
-**Do not download, restore, or run the current ReelIndex Windows setup
-executables.** Microsoft Defender detected the unsigned v1.4.8 self-extracting
-installer as `Trojan:Win32/Sabsik.FL.A!ml` and removed it. The checked-in
-installer design also used PowerShell `-ExecutionPolicy Bypass`, downloaded and
-executed `get-pip.py`, and fetched additional binaries without pinned integrity
-hashes. Windows installer publication is disabled while that packaging path is
-replaced and independently scanned.
+Download the fully offline Windows package from
+[`dist/ReelIndex-Windows-Setup-v1.4.8.1.exe`](dist/ReelIndex-Windows-Setup-v1.4.8.1.exe).
+Its Microsoft Defender release-gate record is published beside it at
+[`dist/ReelIndex-Windows-Setup-v1.4.8.1.defender.json`](dist/ReelIndex-Windows-Setup-v1.4.8.1.defender.json).
 
-This quarantine applies to the Windows setup executables only. The
-Docker/Unraid image uses a separate Linux container build and remains available.
+Windows Setup package 1.4.8.1 contains ReelIndex application version 1.4.8. The
+installer bundles the Python runtime and Python dependencies, performs no
+network access or PowerShell execution on the user device, and verifies an
+embedded SHA-256 manifest before installing files.
+
+The package remains unsigned until an Authenticode certificate is available,
+so SmartScreen can still display an unknown-publisher warning. An
+unknown-publisher warning is different from an antivirus malware detection;
+never bypass an antivirus detection.
+
+Requirements:
+
+- Windows 10 or Windows 11, 64-bit
+- A movie folder, mapped drive, UNC share, Plex server, Jellyfin server, or Emby server
+- A read-only server token when using a media-server source
+
+The installer does not require administrator rights and installs for the
+current Windows user.
 
 ## Docker and Unraid
 
@@ -65,8 +78,8 @@ library mappings, PUID/PGID handling, and v1.0.3 upgrade guidance.
 The original competition submission is preserved as the
 **[v1.0.0 Competition Baseline](https://github.com/bclark303/ReelIndex/releases/tag/v1.0.0)**,
 including its Windows installer and exact source snapshot. Historical Windows
-installers are under review; do not execute them until the quarantine notice is
-removed. See [`docs/RELEASE-HISTORY.md`](docs/RELEASE-HISTORY.md).
+installers used the retired downloader packaging path and should not be run.
+See [`docs/RELEASE-HISTORY.md`](docs/RELEASE-HISTORY.md).
 
 ## First run
 
@@ -114,7 +127,7 @@ backend/             Canonical FastAPI backend and automated tests
 web/                 Canonical browser interface used by every edition
 windows/app/         Generated self-contained Windows payload copy
 windows/launcher/    Windows launcher source
-windows/installer/   Windows installer source (currently quarantined)
+windows/installer/   Offline Windows installer source
 packaging/docker/    nginx and container entrypoint
 packaging/unraid/    Unraid template, icon, and instructions
 docs/                Build, deployment, history, and validation notes
@@ -147,7 +160,7 @@ v1.0.3 appdata. See [`docs/VALIDATION-v1.4.5.md`](docs/VALIDATION-v1.4.5.md).
 - Source tokens are encrypted before storage.
 - API responses and diagnostics mask stored credentials.
 - Do not upload database files, `.secret_key`, logs, cached posters, or `.env` files.
-- Do not bypass antivirus detections for quarantined Windows installers.
+- Do not bypass antivirus detections for Windows installers.
 
 ## License
 

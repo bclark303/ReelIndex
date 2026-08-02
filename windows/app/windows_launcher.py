@@ -20,8 +20,12 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 os.environ.setdefault("REELINDEX_DATA_DIR", str(DATA_DIR))
 os.environ.setdefault("REELINDEX_STATIC_DIR", str(STATIC_DIR))
-os.environ.setdefault("REELINDEX_FFPROBE_PATH", str(TOOLS_DIR / "ffprobe.exe"))
-os.environ.setdefault("REELINDEX_MEDIAINFO_PATH", str(TOOLS_DIR / "mediainfo.exe"))
+ffprobe = TOOLS_DIR / "ffprobe.exe"
+mediainfo = TOOLS_DIR / "mediainfo.exe"
+if ffprobe.is_file():
+    os.environ.setdefault("REELINDEX_FFPROBE_PATH", str(ffprobe))
+if mediainfo.is_file():
+    os.environ.setdefault("REELINDEX_MEDIAINFO_PATH", str(mediainfo))
 os.environ.setdefault("REELINDEX_WINDOWS_MODE", "true")
 os.environ.setdefault("REELINDEX_EDITION", "Windows")
 os.environ.setdefault("REELINDEX_CORS_ORIGINS", "http://127.0.0.1:8765,http://localhost:8765")
