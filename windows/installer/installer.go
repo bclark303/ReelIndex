@@ -70,7 +70,7 @@ func unzip(data []byte, dest string) error {
 	return nil
 }
 func main() {
-	if msg("ReelIndex Setup", "Install ReelIndex Movie Inventory for this Windows user?\n\nSetup installs ReelIndex 1.4.5 and its Windows runtime. Internet access is required by this standard installer; an existing offline-builder package can capture a fully self-contained installer.", 0x44|0x20) != 6 {
+	if msg("ReelIndex Setup", "Install ReelIndex Movie Inventory for this Windows user?\n\nSetup installs ReelIndex 1.4.6 and its Windows runtime. Internet access is required by this standard installer; an existing offline-builder package can capture a fully self-contained installer.", 0x44|0x20) != 6 {
 		return
 	}
 	local := os.Getenv("LOCALAPPDATA")

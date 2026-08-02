@@ -1,0 +1,169 @@
+name: Windows installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+      - backend/app/**
+      - web/**
+      - windows/**
+      - scripts/sync-packages.py
+      - .github/workflows/windows.yml
+  pull_request:
+    paths:
+      - VERSION
+      - backend/app/**
+      - web/**
+      - windows/**
+      - scripts/sync-packages.py
+      - .github/workflows/windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+
+      - name: Verify synchronized Windows payload
+        run: python scripts/sync-packages.py --check
+
+      - name: Build Windows payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION)"
+          rm -rf build/windows-payload windows/installer/payload.zip
+          mkdir -p build/windows-payload/app dist
+          cp -a windows/app/. build/windows-payload/app/
+          cp windows/installer/install-runtime.ps1 build/windows-payload/install-runtime.ps1
+
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags='-s -w -H=windowsgui' \
+            -o build/windows-payload/ReelIndex.exe windows/launcher/main.go
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags='-s -w -H=windowsgui' \
+            -o 'build/windows-payload/Uninstall ReelIndex.exe' windows/installer/uninstall.go
+
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+
+          root = Path('build/windows-payload')
+          output = Path('windows/installer/payload.zip')
+          with ZipFile(output, 'w', compression=ZIP_DEFLATED, compresslevel=9) as archive:
+              for path in sorted(root.rglob('*')):
+                  if path.is_file():
+                      archive.write(path, path.relative_to(root).as_posix())
+          PY
+
+          VERSION="$version" python - <<'PY'
+          import os
+          from zipfile import ZipFile
+
+          version = os.environ['VERSION']
+          with ZipFile('windows/installer/payload.zip') as archive:
+              names = set(archive.namelist())
+              required = {
+                  'ReelIndex.exe',
+                  'Uninstall ReelIndex.exe',
+                  'install-runtime.ps1',
+                  'app/web/index.html',
+                  'app/web/badge-fix.css',
+                  'app/app/version.py',
+              }
+              missing = required - names
+              assert not missing, f'missing payload files: {sorted(missing)}'
+              index = archive.read('app/web/index.html').decode('utf-8')
+              badge_css = archive.read('app/web/badge-fix.css').decode('utf-8')
+              version_py = archive.read('app/app/version.py').decode('utf-8')
+              assert f'badge-fix.css?v={version}' in index, index
+              assert f'ReelIndex {version}' in index, index
+              assert f'__version__ = "{version}"' in version_py, version_py
+              assert '.poster-badges' in badge_css
+              assert 'width: max-content' in badge_css
+              assert 'border-radius: 999px' in badge_css
+          PY
+
+      - name: Build setup executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION)"
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags='-s -w -H=windowsgui' \
+            -o "dist/ReelIndex-Windows-Setup-v${version}.exe" windows/installer/installer.go
+          rm -f windows/installer/payload.zip
+
+          VERSION="$version" python - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path(f"dist/ReelIndex-Windows-Setup-v{os.environ['VERSION']}.exe")
+          data = path.read_bytes()
+          assert data[:2] == b'MZ', 'setup output is not a Windows PE executable'
+          assert len(data) > 500_000, f'setup executable is unexpectedly small: {len(data)} bytes'
+          PY
+
+      - name: Update checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION)"
+          VERSION="$version" python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          version = os.environ['VERSION']
+          dist = Path('dist')
+          filename = f'ReelIndex-Windows-Setup-v{version}.exe'
+          artifact = dist / filename
+          digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+          manifest = dist / 'SHA256SUMS.txt'
+          lines = manifest.read_text(encoding='utf-8').splitlines() if manifest.exists() else []
+          lines = [line for line in lines if not line.endswith(f'  {filename}')]
+          lines.append(f'{digest}  {filename}')
+          manifest.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReelIndex-Windows-Setup
+          path: |
+            dist/ReelIndex-Windows-Setup-v*.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish installer to repository
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f "dist/ReelIndex-Windows-Setup-v${version}.exe"
+          git add dist/SHA256SUMS.txt
+          if git diff --cached --quiet; then
+            echo 'Installer is already current.'
+            exit 0
+          fi
+          git commit -m "Publish Windows v${version} installer [skip ci]"
+          git push
