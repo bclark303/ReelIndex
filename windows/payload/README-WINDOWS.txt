@@ -117,3 +117,12 @@ The footer displays the installed UI version. During an active scan, a red
 **Cancel scan** button appears in the sticky scan banner and on the source card.
 If scan state cannot be loaded, the interface displays that API error rather
 than silently hiding scan controls.
+
+## Clear cached data or start over
+
+Open **Diagnostics → Maintenance**.
+
+- **Clear inventory cache** removes indexed movies, technical metadata, scan history, and downloaded posters while retaining source connections and credentials.
+- **Factory reset ReelIndex** removes all database content, including sources and stored credentials, then returns the app to first-run state.
+
+Both actions require a typed confirmation and are disabled while a scan is active. Neither action changes media files or sidecar artwork/metadata.

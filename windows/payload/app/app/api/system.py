@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -16,14 +17,28 @@ from app.core.database import get_db
 from app.core.security import reveal_config, sanitize_config
 from app.models import MediaFile, Movie, ScanRun, Source
 from app.schemas.api import DiagnosticsOut
+from app.services.maintenance import MaintenanceBlocked, reset_application_data
 from app.services.probe import ffprobe_version
 
 router = APIRouter(tags=["system"])
 
 
+class MaintenanceConfirmation(BaseModel):
+    confirmation: str
+
+
+def _maintenance_reset(*, confirmation: str, expected: str, include_sources: bool):
+    if confirmation.strip() != expected:
+        raise HTTPException(status_code=422, detail=f'Type "{expected}" to confirm')
+    try:
+        return reset_application_data(include_sources=include_sources)
+    except MaintenanceBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/health")
 def health():
-    return {"status": "ok", "app": settings.app_name, "version": "1.1.4"}
+    return {"status": "ok", "app": settings.app_name, "version": "1.1.5"}
 
 
 @router.get("/posters/{movie_id}")
@@ -44,7 +59,7 @@ def _diagnostics(db: Session) -> dict:
     scans = db.scalars(select(ScanRun).order_by(ScanRun.started_at.desc()).limit(20)).all()
     disk = shutil.disk_usage(settings.data_dir)
     return {
-        "app": {"name": settings.app_name, "version": "1.1.4", "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
+        "app": {"name": settings.app_name, "version": "1.1.5", "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
         "system": {
             "platform": platform.platform(),
             "python": platform.python_version(),
@@ -98,3 +113,23 @@ def diagnostics(db: Session = Depends(get_db)):
 @router.get("/diagnostics/export")
 def export_diagnostics(db: Session = Depends(get_db)):
     return JSONResponse(_diagnostics(db), headers={"Content-Disposition": "attachment; filename=reelindex-diagnostics.json"})
+
+
+@router.post("/maintenance/clear-inventory")
+def clear_inventory_cache(payload: MaintenanceConfirmation):
+    """Remove generated inventory while retaining configured source connections."""
+    return _maintenance_reset(
+        confirmation=payload.confirmation,
+        expected="CLEAR CACHE",
+        include_sources=False,
+    )
+
+
+@router.post("/maintenance/factory-reset")
+def factory_reset(payload: MaintenanceConfirmation):
+    """Remove all database records, credentials, scan history, and poster cache."""
+    return _maintenance_reset(
+        confirmation=payload.confirmation,
+        expected="RESET REELINDEX",
+        include_sources=True,
+    )

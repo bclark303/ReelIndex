@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
     scan_scheduler.shutdown()
 
 
-app = FastAPI(title=settings.app_name, version="1.1.4", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.1.5", lifespan=lifespan)
 
 
 @app.middleware("http")

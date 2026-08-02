@@ -42,7 +42,9 @@
   const api={
     movies:q=>{const p=new URLSearchParams();Object.entries(q).forEach(([k,v])=>{if(v!==undefined&&v!==''&&v!==false)p.set(k,String(v));});return request('/movies?'+p)}, movie:id=>request('/movies/'+encodeURIComponent(id)), stats:()=>request('/stats'),
     sources:()=>request('/sources'), createSource:p=>request('/sources',{method:'POST',body:JSON.stringify(p)}), updateSource:(id,p)=>request('/sources/'+id,{method:'PUT',body:JSON.stringify(p)}), deleteSource:id=>request('/sources/'+id,{method:'DELETE'}), testSource:p=>request('/sources/test',{method:'POST',body:JSON.stringify(p)}),
-    scans:()=>request('/scans'), startScan:id=>request('/scans/'+id,{method:'POST'}), cancelScan:id=>request('/scans/'+id+'/cancel',{method:'POST'}), diagnostics:()=>request('/diagnostics')
+    scans:()=>request('/scans'), startScan:id=>request('/scans/'+id,{method:'POST'}), cancelScan:id=>request('/scans/'+id+'/cancel',{method:'POST'}), diagnostics:()=>request('/diagnostics'),
+    clearInventory:confirmation=>request('/maintenance/clear-inventory',{method:'POST',body:JSON.stringify({confirmation})}),
+    factoryReset:confirmation=>request('/maintenance/factory-reset',{method:'POST',body:JSON.stringify({confirmation})})
   };
   function loading(label='Loading'){ return `<div class="loading"><span class="spinner"></span><span>${esc(label)}</span></div>`; }
   function empty(title,message,action=''){ return `<div class="empty-state">${icon('film',42)}<h2>${esc(title)}</h2><p>${esc(message)}</p>${action}</div>`; }
@@ -116,7 +118,63 @@
   function sourcePayload(f){const config={};if(f.token)config.token=f.token;if(f.user_id)config.user_id=f.user_id;config.verify_ssl=f.verify_ssl;if(f.tmdb_token)config.tmdb_token=f.tmdb_token;if(f.remote_path&&f.local_path)config.path_mappings=[{remote:f.remote_path,local:f.local_path}];return {name:f.name,type:f.type,url_or_path:f.url_or_path,library_id:f.library_id||null,config,schedule_enabled:f.schedule_enabled,schedule_minutes:f.schedule_minutes,enabled:true};}
   function bindSourceModal(){overlay.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>{overlay.innerHTML='';state.sourceModal=null;});overlay.querySelectorAll('[data-type]').forEach(b=>b.onclick=()=>{readSourceForm();state.sourceModal.form.type=b.dataset.type;state.sourceModal.libraries=[];renderSourceModal();});document.getElementById('test-source').onclick=async()=>{const f=readSourceForm();renderSourceModal(`<div class="connection-status loading">${icon('refresh',18,'spin')}<span>Testing connection…</span></div>`);try{const r=await api.testSource({type:f.type,url_or_path:f.url_or_path,library_id:f.library_id||null,config:sourcePayload(f).config});state.sourceModal.libraries=r.libraries||[];if(!f.library_id&&state.sourceModal.libraries.length===1)f.library_id=state.sourceModal.libraries[0].id;renderSourceModal(`<div class="connection-status ${r.ok?'success':'error'}">${icon(r.ok?'check':'warning',18)}<span>${esc(r.message)}</span></div>`);}catch(e){renderSourceModal(`<div class="connection-status error">${icon('warning',18)}<span>${esc(e.message)}</span></div>`);}};document.getElementById('source-form').onsubmit=async e=>{e.preventDefault();const f=readSourceForm();const payload=sourcePayload(f);const submit=e.submitter;submit.disabled=true;submit.textContent='Saving…';try{if(state.sourceModal.source)await api.updateSource(state.sourceModal.source.id,payload);else await api.createSource(payload);overlay.innerHTML='';state.sourceModal=null;await loadSources();renderSources();toast('Source saved');}catch(err){submit.disabled=false;submit.textContent=state.sourceModal.source?'Save changes':'Add source';document.getElementById('connection-status').innerHTML=`<div class="connection-status error">${icon('warning',18)}<span>${esc(err.message)}</span></div>`;}};}
 
-  async function renderDiagnostics(initial=false){if(initial){main.innerHTML=loading('Collecting diagnostics');try{state.diagnostics=await api.diagnostics();showError('');}catch(e){showError(e.message);state.diagnostics=null;}}const d=state.diagnostics;if(!d){main.innerHTML=`<section class="page-heading"><div><span class="eyebrow">Troubleshooting</span><h1>Diagnostics</h1></div></section><div class="error-panel">${icon('warning')}<p>Diagnostics could not be loaded.</p></div>`;return;}main.innerHTML=`<section class="page-heading split-heading"><div><span class="eyebrow">Troubleshooting and disclosure</span><h1>Diagnostics</h1><p>Review system capability, source configuration, and recent inventory runs.</p></div><a class="button secondary" href="/api/diagnostics/export" download>${icon('download',17)}Export JSON</a></section><div class="diagnostics-stack"><section class="diagnostic-card"><div class="section-heading"><div><span class="eyebrow">Runtime</span><h2>System</h2></div>${icon('activity')}</div>${valueGrid(d.system)}</section><section class="diagnostic-card"><div class="section-heading"><div><span class="eyebrow">Persistent cache</span><h2>Database</h2></div>${icon('database')}</div>${valueGrid(d.database)}</section><section class="diagnostic-card full"><div class="section-heading"><div><span class="eyebrow">Recent activity</span><h2>Scan history</h2></div>${icon('clock')}</div><div class="scan-history">${d.recent_scans.length?d.recent_scans.map(scan=>`<div class="history-row"><span class="status-dot ${esc(scan.status)}"></span><div><strong>${esc(scan.status)}</strong><span>${esc(scan.started_at)}</span></div><div class="history-counts"><span>${scan.discovered} found</span><span>${scan.cached} cached</span><span>${scan.errors} errors</span></div></div>`).join(''):'<p style="padding:12px">No scans have run yet.</p>'}</div></section></div>`;}
+  async function renderDiagnostics(initial=false){
+    if(initial){
+      main.innerHTML=loading('Collecting diagnostics');
+      try{state.diagnostics=await api.diagnostics();showError('');}
+      catch(e){showError(e.message);state.diagnostics=null;}
+    }
+    const d=state.diagnostics;
+    if(!d){
+      main.innerHTML=`<section class="page-heading"><div><span class="eyebrow">Troubleshooting</span><h1>Diagnostics</h1></div></section><div class="error-panel">${icon('warning')}<p>Diagnostics could not be loaded.</p></div>`;
+      return;
+    }
+    const activeScan=state.scans.some(scan=>['queued','running','cancelling'].includes(scan.status));
+    const blocked=activeScan?'disabled':'';
+    main.innerHTML=`<section class="page-heading split-heading"><div><span class="eyebrow">Troubleshooting and disclosure</span><h1>Diagnostics</h1><p>Review system capability, source configuration, and recent inventory runs.</p></div><a class="button secondary" href="/api/diagnostics/export" download>${icon('download',17)}Export JSON</a></section><div class="diagnostics-stack"><section class="diagnostic-card"><div class="section-heading"><div><span class="eyebrow">Runtime</span><h2>System</h2></div>${icon('activity')}</div>${valueGrid(d.system)}</section><section class="diagnostic-card"><div class="section-heading"><div><span class="eyebrow">Persistent cache</span><h2>Database</h2></div>${icon('database')}</div>${valueGrid(d.database)}</section><section class="diagnostic-card full"><div class="section-heading"><div><span class="eyebrow">Recent activity</span><h2>Scan history</h2></div>${icon('clock')}</div><div class="scan-history">${d.recent_scans.length?d.recent_scans.map(scan=>`<div class="history-row"><span class="status-dot ${esc(scan.status)}"></span><div><strong>${esc(scan.status)}</strong><span>${esc(scan.started_at)}</span></div><div class="history-counts"><span>${scan.discovered} found</span><span>${scan.cached} cached</span><span>${scan.errors} errors</span></div></div>`).join(''):'<p style="padding:12px">No scans have run yet.</p>'}</div></section><section class="diagnostic-card full maintenance-card"><div class="section-heading"><div><span class="eyebrow">Destructive actions</span><h2>Maintenance</h2></div>${icon('trash')}</div>${activeScan?`<div class="maintenance-warning">${icon('warning',17)}<span>Cancel the active scan before clearing application data.</span></div>`:''}<div class="maintenance-grid"><article class="maintenance-action"><div><h3>Clear inventory cache</h3><p>Remove indexed movies, technical metadata, scan history, and downloaded posters. Source connections and credentials are retained.</p></div><button class="button secondary" id="clear-inventory" ${blocked}>Clear cache</button></article><article class="maintenance-action danger-zone"><div><h3>Factory reset ReelIndex</h3><p>Delete every source connection, stored credential, movie record, scan record, and cached poster. The installed application remains.</p></div><button class="button danger" id="factory-reset" ${blocked}>Reset everything</button></article></div></section></div>`;
+    document.getElementById('clear-inventory').onclick=()=>openMaintenanceModal('cache');
+    document.getElementById('factory-reset').onclick=()=>openMaintenanceModal('factory');
+  }
+
+  function openMaintenanceModal(mode){
+    const factory=mode==='factory';
+    const phrase=factory?'RESET REELINDEX':'CLEAR CACHE';
+    const title=factory?'Factory reset ReelIndex':'Clear inventory cache';
+    const description=factory
+      ?'This permanently removes all ReelIndex database content, including source connections and encrypted credentials. Your movie files are never changed.'
+      :'This removes the generated inventory, technical metadata, scan history, and poster cache. Your configured source connections are retained.';
+    overlay.innerHTML=`<div class="modal-backdrop"><div class="source-modal maintenance-modal"><div class="modal-header"><div><span class="eyebrow">Confirmation required</span><h2>${title}</h2></div><button class="icon-button" data-close>${icon('x')}</button></div><div class="maintenance-confirmation"><div class="warning-callout">${icon('warning',20)}<p>${esc(description)}</p></div><label><span>Type <strong>${phrase}</strong> to continue</span><input id="maintenance-phrase" autocomplete="off" spellcheck="false" placeholder="${phrase}" /></label><div id="maintenance-status"></div><div class="modal-actions"><div class="action-spacer"></div><button type="button" class="button ghost" data-close>Cancel</button><button type="button" class="button danger" id="confirm-maintenance" disabled>${factory?'Reset everything':'Clear cache'}</button></div></div></div></div>`;
+    const input=document.getElementById('maintenance-phrase');
+    const confirmButton=document.getElementById('confirm-maintenance');
+    const close=()=>{overlay.innerHTML='';};
+    overlay.querySelectorAll('[data-close]').forEach(button=>button.onclick=close);
+    input.oninput=()=>{confirmButton.disabled=input.value.trim()!==phrase;};
+    input.onkeydown=event=>{if(event.key==='Enter'&&!confirmButton.disabled)confirmButton.click();};
+    confirmButton.onclick=async()=>{
+      confirmButton.disabled=true;
+      input.disabled=true;
+      confirmButton.textContent=factory?'Resetting…':'Clearing…';
+      document.getElementById('maintenance-status').innerHTML=`<div class="connection-status loading">${icon('refresh',18,'spin')}<span>Please keep ReelIndex open while local data is removed.</span></div>`;
+      try{
+        const result=factory?await api.factoryReset(phrase):await api.clearInventory(phrase);
+        toast(result.message||'Maintenance completed');
+        if(factory)localStorage.removeItem('reelindex-view');
+        overlay.innerHTML='';
+        state.movies=null;state.stats=null;state.diagnostics=null;state.query={sort:'title',direction:'asc',page:1,page_size:100};
+        await Promise.all([loadSources(),loadScans()]);
+        state.page=factory?'sources':'library';
+        location.hash=state.page;
+        await renderPage();
+      }catch(error){
+        input.disabled=false;
+        confirmButton.disabled=input.value.trim()!==phrase;
+        confirmButton.textContent=factory?'Reset everything':'Clear cache';
+        document.getElementById('maintenance-status').innerHTML=`<div class="connection-status error">${icon('warning',18)}<span>${esc(error.message)}</span></div>`;
+      }
+    };
+    setTimeout(()=>input.focus(),0);
+  }
+
   function valueGrid(data){return `<div class="diagnostic-grid">${Object.entries(data).map(([k,v])=>`<div class="diagnostic-value"><span>${esc(k.replaceAll('_',' '))}</span><strong>${esc(typeof v==='number'&&k.includes('disk')?fmtBytes(v):String(v??'—'))}</strong></div>`).join('')}</div>`;}
 
   (async function init(){await loadSources();await loadScans();renderPage();schedulePoll();})();

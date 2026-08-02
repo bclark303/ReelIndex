@@ -92,6 +92,11 @@ class ScanManager:
         with self._lock:
             return self._active.get(source_id)
 
+    def active_runs(self) -> dict[str, str]:
+        """Return a snapshot of source IDs and their active scan run IDs."""
+        with self._lock:
+            return dict(self._active)
+
     def cancel(self, run_id: str) -> bool:
         with self._lock:
             cancel_event = self._cancel_events.get(run_id)
