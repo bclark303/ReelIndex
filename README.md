@@ -10,24 +10,18 @@ browser interface.
 
 ![ReelIndex library](docs/images/library.png)
 
-## Download for Windows
+## Windows download temporarily quarantined
 
-Download the current installer from
-[`dist/ReelIndex-Windows-Setup-v1.4.8.exe`](dist/ReelIndex-Windows-Setup-v1.4.8.exe).
+**Do not download, restore, or run the current ReelIndex Windows setup
+executables.** Microsoft Defender detected the unsigned v1.4.8 self-extracting
+installer as `Trojan:Win32/Sabsik.FL.A!ml` and removed it. The checked-in
+installer design also used PowerShell `-ExecutionPolicy Bypass`, downloaded and
+executed `get-pip.py`, and fetched additional binaries without pinned integrity
+hashes. Windows installer publication is disabled while that packaging path is
+replaced and independently scanned.
 
-The installer is not digitally signed, so Windows SmartScreen may show an
-unknown-publisher warning. Verify it against [`dist/SHA256SUMS.txt`](dist/SHA256SUMS.txt)
-before running it.
-
-Requirements:
-
-- Windows 10 or Windows 11, 64-bit
-- Internet access during standard installation
-- A movie folder, mapped drive, UNC share, Plex server, Jellyfin server, or Emby server
-- A read-only server token when using a media-server source
-
-The installer does not require administrator rights. ReelIndex installs for
-the current Windows user.
+This quarantine applies to the Windows setup executables only. The
+Docker/Unraid image uses a separate Linux container build and remains available.
 
 ## Docker and Unraid
 
@@ -70,9 +64,9 @@ library mappings, PUID/PGID handling, and v1.0.3 upgrade guidance.
 
 The original competition submission is preserved as the
 **[v1.0.0 Competition Baseline](https://github.com/bclark303/ReelIndex/releases/tag/v1.0.0)**,
-including its Windows installer and exact source snapshot. Every subsequent
-Windows revision and the original Unraid line remain available under Releases.
-See [`docs/RELEASE-HISTORY.md`](docs/RELEASE-HISTORY.md).
+including its Windows installer and exact source snapshot. Historical Windows
+installers are under review; do not execute them until the quarantine notice is
+removed. See [`docs/RELEASE-HISTORY.md`](docs/RELEASE-HISTORY.md).
 
 ## First run
 
@@ -120,7 +114,7 @@ backend/             Canonical FastAPI backend and automated tests
 web/                 Canonical browser interface used by every edition
 windows/app/         Generated self-contained Windows payload copy
 windows/launcher/    Windows launcher source
-windows/installer/   Windows installer source
+windows/installer/   Windows installer source (currently quarantined)
 packaging/docker/    nginx and container entrypoint
 packaging/unraid/    Unraid template, icon, and instructions
 docs/                Build, deployment, history, and validation notes
@@ -153,6 +147,7 @@ v1.0.3 appdata. See [`docs/VALIDATION-v1.4.5.md`](docs/VALIDATION-v1.4.5.md).
 - Source tokens are encrypted before storage.
 - API responses and diagnostics mask stored credentials.
 - Do not upload database files, `.secret_key`, logs, cached posters, or `.env` files.
+- Do not bypass antivirus detections for quarantined Windows installers.
 
 ## License
 
