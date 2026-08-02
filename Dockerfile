@@ -5,7 +5,8 @@ LABEL org.opencontainers.image.title="ReelIndex" \
       org.opencontainers.image.description="Read-only movie inventory for Windows, Docker, and Unraid" \
       org.opencontainers.image.source="https://github.com/bclark303/ReelIndex" \
       org.opencontainers.image.version="${REELINDEX_VERSION}" \
-      org.opencontainers.image.licenses="NOASSERTION"
+      org.opencontainers.image.licenses="NOASSERTION" \
+      net.unraid.docker.icon="https://raw.githubusercontent.com/bclark303/ReelIndex/main/packaging/unraid/reelindex-icon.png"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
