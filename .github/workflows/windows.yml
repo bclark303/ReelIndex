@@ -34,33 +34,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.head_ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
-          cache-dependency-path: backend/requirements-dev.txt
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
-
-      - name: Finalize global identity v1.4.7
-        if: github.event_name == 'pull_request' && github.head_ref == 'agent/global-library-identity'
-        shell: bash
-        run: |
-          set -euo pipefail
-          export REELINDEX_DATA_DIR="${RUNNER_TEMP}/reelindex-identity-tests"
-          python scripts/finalize_global_identity.py
-          python scripts/sync-packages.py
-          python -m compileall -q backend/app windows/app/app
-          python -m pip install --upgrade pip
-          pip install -r backend/requirements-dev.txt
-          (cd backend && pytest -q tests/test_global_library_identity.py tests/test_release_identity.py)
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add VERSION README.md Dockerfile docker-compose.yml backend web windows
-          git commit -m 'Finalize global library identity v1.4.7'
-          git push origin HEAD:${{ github.head_ref }}
 
       - name: Verify synchronized Windows payload
         run: python scripts/sync-packages.py --check
