@@ -74,7 +74,7 @@ jobs:
           assert isinstance(scans, list), scans
           assert isinstance(stats, dict), stats
           PY
-          docker exec reelindex-smoke python -c "import sqlite3; db=sqlite3.connect('/data/reelindex.db'); tables={row[0] for row in db.execute(\"select name from sqlite_master where type='table'\")}; required={'sources','movies','media_files','scan_runs'}; missing=required-tables; assert not missing, missing; mode=db.execute('pragma journal_mode').fetchone()[0].lower(); assert mode == 'delete', mode"
+          docker exec reelindex-smoke python -c "import sqlite3; db=sqlite3.connect('/data/reelindex.db'); tables={row[0] for row in db.execute(\"select name from sqlite_master where type='table'\")}; required={'sources','movies','movie_sources','media_files','media_file_sources','scan_runs'}; missing=required-tables; assert not missing, missing; mode=db.execute('pragma journal_mode').fetchone()[0].lower(); assert mode == 'delete', mode"
           curl --fail --silent --show-error http://127.0.0.1:18080/ | grep -q 'ReelIndex 1.4.6'
           docker exec reelindex-smoke ffprobe -version
           docker exec reelindex-smoke mediainfo --Version
