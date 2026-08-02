@@ -114,6 +114,9 @@ input { height: 44px; padding: 0 12px; width: 100%; }
 .button.secondary { background: var(--panel-3); border-color: #343c4b; }
 .button.secondary:hover { border-color: #515b6b; }
 .button.ghost { background: transparent; border-color: var(--line); color: #c5cad3; }
+.button.danger { color: #fff; background: #b92f3a; border-color: #e45863; box-shadow: 0 0 0 1px rgba(255,107,117,.08), 0 8px 20px rgba(185,47,58,.22); }
+.button.danger:hover { background: #d13c48; border-color: #ff7e87; }
+.button.small { height: 36px; padding: 0 13px; font-size: 12px; }
 .icon-button { width: 39px; height: 39px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); cursor: pointer; }
 .icon-button.danger { color: var(--danger); }
 .error-panel, .notice-card { display: flex; gap: 13px; align-items: flex-start; padding: 15px 17px; margin: 13px 0; border-radius: 12px; }
@@ -123,6 +126,7 @@ input { height: 44px; padding: 0 12px; width: 100%; }
 .notice-card p { color: var(--muted); }
 .notice-card code { color: var(--success); }
 .global-error { margin: 0; display: flex; gap: 8px; align-items: center; justify-content: center; padding: 8px; color: #ffd0d3; background: #3b181d; font-size: 12px; }
+.scan-state-error { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 16px; color: #ffd0d3; background: #3b181d; border-bottom: 1px solid rgba(255,107,117,.28); font-size: 12px; }
 .scan-panel { position: sticky; top: 72px; z-index: 35; border-bottom: 1px solid rgba(233,185,73,.18); background: rgba(21,18,12,.95); backdrop-filter: blur(15px); }
 .scan-row { width: min(1560px, calc(100% - 48px)); margin: 0 auto; display: flex; gap: 12px; padding: 11px 0; }
 .scan-icon { display: grid; place-items: center; color: var(--accent); }

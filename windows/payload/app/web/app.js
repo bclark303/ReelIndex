@@ -35,7 +35,7 @@
   function toast(message,type='success'){ const node=document.createElement('div'); node.className=`toast ${type}`; node.textContent=message; document.body.appendChild(node); setTimeout(()=>node.remove(),3500); }
   function showError(message){ globalError.innerHTML=message?`<div class="global-error">${icon('warning',16)}<span>${esc(message)}</span></div>`:''; }
   async function request(path,init={}){
-    const response=await fetch(API+path,{...init,headers:{'Content-Type':'application/json',...(init.headers||{})}});
+    const response=await fetch(API+path,{cache:'no-store',...init,headers:{'Content-Type':'application/json',...(init.headers||{})}});
     if(!response.ok){ let payload={}; try{payload=await response.json();}catch{} throw new Error(payload.detail||response.statusText||'Request failed'); }
     return response.status===204?null:response.json();
   }
@@ -55,7 +55,7 @@
   window.addEventListener('hashchange',()=>{const p=location.hash.replace('#','')||'library'; if(p!==state.page){state.page=p;renderPage();}});
 
   async function loadSources(){ try{state.sources=await api.sources();showError('');}catch(e){showError(e.message);} }
-  async function loadScans(){ try{state.scans=await api.scans(); renderScanPanel();}catch{} }
+  async function loadScans(){ try{state.scans=await api.scans(); renderScanPanel();}catch(e){state.scans=[];scanPanel.innerHTML=`<div class="scan-state-error">${icon('warning',17)}<span>Scan controls unavailable: ${esc(e.message)}</span></div>`;console.error('Could not load scan state',e);} }
   function renderScanPanel(){
     const active=state.scans.filter(s=>['queued','running','cancelling'].includes(s.status));
     if(!active.length){scanPanel.innerHTML='';return;}

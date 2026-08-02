@@ -108,3 +108,12 @@ The first filesystem scan still has to read every directory and inspect every me
 ## Scan cancellation in version 1.1.2
 
 Active scans can be cancelled from the progress banner or from the Sources page. ReelIndex stops discovery, pending media analysis, and pending poster work, terminates active ffprobe processes, and records the run as cancelled. Movies already indexed before cancellation remain available; media files are never modified.
+
+
+## UI update reliability in version 1.1.3
+
+ReelIndex now cache-busts its browser assets and marks the web UI as no-cache.
+The footer displays the installed UI version. During an active scan, a red
+**Cancel scan** button appears in the sticky scan banner and on the source card.
+If scan state cannot be loaded, the interface displays that API error rather
+than silently hiding scan controls.
