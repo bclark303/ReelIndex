@@ -151,3 +151,4 @@ class DiagnosticsOut(BaseModel):
     database: dict[str, Any]
     sources: list[dict[str, Any]]
     recent_scans: list[dict[str, Any]]
+    logging: dict[str, Any] = {}

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     probe_workers: int = 4
     poster_workers: int = 6
     scan_commit_interval: int = 50
+    scan_verbose: bool = False
     ffprobe_path: str = "ffprobe"
     mediainfo_path: str = "mediainfo"
     static_dir: Path | None = None

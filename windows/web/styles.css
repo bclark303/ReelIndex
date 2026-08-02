@@ -326,3 +326,7 @@ input { height: 44px; padding: 0 12px; width: 100%; }
   .scan-event { grid-template-columns: 72px 68px minmax(0, 1fr); gap: 7px; padding-inline: 9px; }
   .live-scan-footer { flex-direction: column; gap: 3px; }
 }
+
+/* v1.2.2 verbose scan diagnostics */
+.logging-setting{display:flex;align-items:center;justify-content:space-between;gap:28px;padding:4px 0 14px}.logging-setting h3{margin:0 0 6px;font-size:1rem}.logging-setting p{margin:0;max-width:760px;color:var(--muted);line-height:1.55}.switch-row{display:flex;align-items:center;gap:10px;white-space:nowrap;font-weight:700}.switch-row input{appearance:none;width:46px;height:25px;border-radius:999px;background:var(--line);position:relative;cursor:pointer;transition:.2s}.switch-row input::after{content:"";position:absolute;width:19px;height:19px;left:3px;top:3px;border-radius:50%;background:white;box-shadow:0 2px 7px rgba(0,0,0,.25);transition:.2s}.switch-row input:checked{background:var(--accent)}.switch-row input:checked::after{transform:translateX(21px)}.switch-row input:disabled{opacity:.55;cursor:wait}.privacy-note{margin-top:4px}.live-scan-controls a.button{display:inline-flex;text-decoration:none;align-items:center;gap:6px}
+@media(max-width:720px){.logging-setting{align-items:flex-start;flex-direction:column;gap:14px}}

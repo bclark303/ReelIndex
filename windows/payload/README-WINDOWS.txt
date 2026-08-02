@@ -122,3 +122,8 @@ Open **Diagnostics → Maintenance**.
 - **Factory reset ReelIndex** removes all database content, including sources and stored credentials, then returns the app to first-run state.
 
 Both actions require a typed confirmation and are disabled while a scan is active. Neither action changes media files or sidecar artwork/metadata.
+
+ReelIndex 1.2.2 adds optional verbose performance logging. Enable it under
+Diagnostics, reproduce a partial scan, then use Sources > Scan output >
+Download log. The JSONL export excludes credentials but may include movie
+names and filesystem paths.

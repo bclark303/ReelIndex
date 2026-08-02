@@ -20,12 +20,17 @@ from app.schemas.api import DiagnosticsOut
 from app.services.maintenance import MaintenanceBlocked, reset_application_data
 from app.services.mediainfo import mediainfo_version
 from app.services.probe import ffprobe_version
+from app.services.runtime_settings import runtime_settings
 
 router = APIRouter(tags=["system"])
 
 
 class MaintenanceConfirmation(BaseModel):
     confirmation: str
+
+
+class LoggingSettingsUpdate(BaseModel):
+    verbose_scan_logging: bool
 
 
 def _maintenance_reset(*, confirmation: str, expected: str, include_sources: bool):
@@ -39,7 +44,7 @@ def _maintenance_reset(*, confirmation: str, expected: str, include_sources: boo
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "app": settings.app_name, "version": "1.2.1"}
+    return {"status": "ok", "app": settings.app_name, "version": "1.2.2"}
 
 
 @router.get("/posters/{movie_id}")
@@ -60,7 +65,7 @@ def _diagnostics(db: Session) -> dict:
     scans = db.scalars(select(ScanRun).order_by(ScanRun.started_at.desc()).limit(20)).all()
     disk = shutil.disk_usage(settings.data_dir)
     return {
-        "app": {"name": settings.app_name, "version": "1.2.1", "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
+        "app": {"name": settings.app_name, "version": "1.2.2", "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
         "system": {
             "platform": platform.platform(),
             "python": platform.python_version(),
@@ -109,12 +114,26 @@ def _diagnostics(db: Session) -> dict:
 
 @router.get("/diagnostics", response_model=DiagnosticsOut)
 def diagnostics(db: Session = Depends(get_db)):
-    return _diagnostics(db)
+    payload = _diagnostics(db)
+    payload["logging"] = runtime_settings.get_all()
+    return payload
+
+
+@router.get("/settings/logging")
+def get_logging_settings():
+    return runtime_settings.get_all()
+
+
+@router.put("/settings/logging")
+def update_logging_settings(payload: LoggingSettingsUpdate):
+    return runtime_settings.update(verbose_scan_logging=payload.verbose_scan_logging)
 
 
 @router.get("/diagnostics/export")
 def export_diagnostics(db: Session = Depends(get_db)):
-    return JSONResponse(_diagnostics(db), headers={"Content-Disposition": "attachment; filename=reelindex-diagnostics.json"})
+    payload = _diagnostics(db)
+    payload["logging"] = runtime_settings.get_all()
+    return JSONResponse(payload, headers={"Content-Disposition": "attachment; filename=reelindex-diagnostics.json"})
 
 
 @router.post("/maintenance/clear-inventory")

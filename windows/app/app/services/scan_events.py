@@ -131,6 +131,16 @@ class ScanEventStore:
             "has_more": next_cursor < size,
         }
 
+    def export_text(self, run_id: str) -> str:
+        """Return the complete JSONL event log for download, including active runs."""
+        path = self._path(run_id)
+        if not path.exists():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+
     def clear_all(self, directory: Path | None = None) -> tuple[int, int]:
         target = directory or self.directory
         target.mkdir(parents=True, exist_ok=True)

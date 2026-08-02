@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -99,3 +99,21 @@ def get_scan_events(
         }
     )
     return payload
+
+
+@router.get("/{run_id}/events/export")
+def export_scan_events(run_id: str, db: Session = Depends(get_db)):
+    """Download the complete event log for an active or completed scan."""
+    run = db.get(ScanRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    body = scan_event_store.export_text(run_id)
+    filename = f"reelindex-scan-{run_id}.jsonl"
+    return Response(
+        content=body,
+        media_type="application/x-ndjson",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )

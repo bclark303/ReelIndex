@@ -25,11 +25,13 @@ os.environ.setdefault("REELINDEX_MEDIAINFO_PATH", str(TOOLS_DIR / "mediainfo.exe
 os.environ.setdefault("REELINDEX_WINDOWS_MODE", "true")
 os.environ.setdefault("REELINDEX_CORS_ORIGINS", "http://127.0.0.1:8765,http://localhost:8765")
 os.environ.setdefault("REELINDEX_LOG_LEVEL", "INFO")
+LOG_LEVEL_NAME = os.environ.get("REELINDEX_LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = getattr(logging, LOG_LEVEL_NAME, logging.INFO)
 
 sys.path.insert(0, str(INSTALL_DIR / "app"))
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=LOG_LEVEL,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     handlers=[logging.FileHandler(LOG_DIR / "reelindex.log", encoding="utf-8")],
     force=True,
@@ -59,7 +61,7 @@ def main() -> int:
 
     logger.info("Starting ReelIndex on http://127.0.0.1:%s", port)
     try:
-        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info", access_log=False)
+        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level=LOG_LEVEL_NAME.lower(), access_log=False)
         uvicorn.Server(config).run()
         return 0
     except Exception:
