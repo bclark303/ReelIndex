@@ -65,10 +65,10 @@ jobs:
           import json
           payload = json.load(open('health.json', encoding='utf-8'))
           assert payload['status'] == 'ok', payload
-          assert payload['version'] == '1.4.5', payload
+          assert payload['version'] == '1.4.6', payload
           assert payload['edition'] == 'Docker / Unraid', payload
           PY
-          curl --fail --silent --show-error http://127.0.0.1:18080/ | grep -q 'ReelIndex 1.4.5'
+          curl --fail --silent --show-error http://127.0.0.1:18080/ | grep -q 'ReelIndex 1.4.6'
           docker exec reelindex-smoke ffprobe -version
           docker exec reelindex-smoke mediainfo --Version
           test -f "${RUNNER_TEMP}/reelindex-data/reelindex.db"
