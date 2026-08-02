@@ -1,19 +1,29 @@
 from collections.abc import Generator
-from sqlalchemy import create_engine, event
+
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 from app.models import Base
 
-connect_args = {"check_same_thread": False} if settings.db_url.startswith("sqlite") else {}
-engine = create_engine(settings.db_url, connect_args=connect_args, pool_pre_ping=True)
+_is_sqlite = settings.db_url.startswith("sqlite")
+engine_options: dict = {"pool_pre_ping": True}
+if _is_sqlite:
+    # Unraid user shares can move or replace the underlying SQLite file while a
+    # container is running. Avoid retaining pooled handles to an old inode and
+    # wait briefly for ordinary concurrent writes instead of failing at once.
+    engine_options["connect_args"] = {"check_same_thread": False, "timeout": 30}
+    engine_options["poolclass"] = NullPool
 
-if settings.db_url.startswith("sqlite"):
+engine = create_engine(settings.db_url, **engine_options)
+
+if _is_sqlite:
     @event.listens_for(engine, "connect")
     def _sqlite_pragmas(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.close()
 
@@ -21,7 +31,38 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 
 
 def init_db() -> None:
-    Base.metadata.create_all(bind=engine)
+    if not _is_sqlite:
+        Base.metadata.create_all(bind=engine)
+        return
+
+    journal_mode = settings.sqlite_journal_mode.strip().upper()
+    supported_modes = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}
+    if journal_mode not in supported_modes:
+        raise RuntimeError(
+            "REELINDEX_SQLITE_JOURNAL_MODE must be one of "
+            + ", ".join(sorted(supported_modes))
+        )
+
+    # Set the persistent journal mode before creating or validating tables.
+    # DELETE is the safe default for bind-mounted Unraid appdata paths; WAL can
+    # still be selected explicitly for a local filesystem that supports it.
+    with engine.connect() as connection:
+        active_mode = connection.exec_driver_sql(f"PRAGMA journal_mode={journal_mode}").scalar_one()
+        if str(active_mode).upper() != journal_mode:
+            raise RuntimeError(
+                f"SQLite refused journal mode {journal_mode}; active mode is {active_mode}"
+            )
+        Base.metadata.create_all(bind=connection)
+        connection.commit()
+
+        expected_tables = set(Base.metadata.tables)
+        existing_tables = set(inspect(connection).get_table_names())
+        missing_tables = sorted(expected_tables - existing_tables)
+        if missing_tables:
+            raise RuntimeError(
+                "SQLite schema initialization is incomplete; missing tables: "
+                + ", ".join(missing_tables)
+            )
 
 
 def get_db() -> Generator[Session, None, None]:
