@@ -1601,7 +1601,7 @@ class ScanManager:
         status = marker.get("status")
         if status in {"failed", "deferred"}:
             return False
-        return cached_mode in {"deep", "server"} or source in {"ffprobe", "media-server", "mediainfo+ffprobe", "ffprobe-standard", "ffprobe-extended"}
+        return cached_mode in {"deep", "server"} or source in {"ffprobe", "media-server", "mediainfo+ffprobe", "ffprobe-standard", "ffprobe-extended", "matroska-native"}
 
     @staticmethod
     def _needs_deep_fallback(technical: dict[str, Any]) -> bool:
@@ -1767,17 +1767,15 @@ class ScanManager:
         )
         suffix = Path(file_candidate.filename).suffix.lower()
         stage_matroska = suffix in {".mkv", ".webm"}
-        stage_bytes = (
-            settings.deep_probe_stage_bytes
-            if max(0, int(attempt_count or 0)) == 0
-            else settings.deep_probe_retry_stage_bytes
-        )
+        # Native Matroska parsing always begins with the smallest header window
+        # and expands locally only when the header is genuinely incomplete.
+        stage_bytes = settings.deep_probe_stage_bytes
         if stage_matroska:
             event(
                 "info",
                 "ffprobe",
                 (
-                    f"Local Matroska header probe ({stage_bytes // (1024 * 1024)} MB): "
+                    f"Native Matroska header scan ({stage_bytes // (1024 * 1024)} MB initial): "
                     f"{file_candidate.filename}"
                 ),
             )
@@ -1804,15 +1802,20 @@ class ScanManager:
             raise
         if verbose:
             elapsed = time.perf_counter() - standard_started
-            event("debug", "timing", f"ffprobe standard {elapsed:.3f}s: {file_candidate.filename}")
             diagnostics = standard.get("probe_diagnostics") if standard else None
+            transport = standard.get("probe_transport") if standard else None
+            if transport and transport.startswith("native-matroska-header"):
+                event("debug", "timing", f"Native Matroska analysis {elapsed:.3f}s: {file_candidate.filename}")
+            else:
+                event("debug", "timing", f"ffprobe standard {elapsed:.3f}s: {file_candidate.filename}")
             if diagnostics:
                 event(
                     "debug",
                     "timing",
                     (
                         f"Matroska staging {diagnostics.get('staging_seconds', 0):.3f}s + "
-                        f"local probe {diagnostics.get('local_probe_seconds', 0):.3f}s: "
+                        f"native parse {diagnostics.get('native_parse_seconds', 0):.4f}s + "
+                        f"fallback probe {diagnostics.get('local_probe_seconds', 0):.3f}s: "
                         f"{file_candidate.filename}"
                     ),
                 )
@@ -1836,8 +1839,13 @@ class ScanManager:
 
         if ffprobe_circuit:
             ffprobe_circuit.record_success()
+        analysis_source = (
+            "matroska-native"
+            if str(standard.get("probe_transport") or "").startswith("native-matroska-header")
+            else "ffprobe-standard"
+        )
         standard.update({
-            "analysis_source": "ffprobe-standard",
+            "analysis_source": analysis_source,
             "analysis_mode": "deep",
             "analysis_status": "complete",
             "analysis_version": settings.deep_analysis_version,

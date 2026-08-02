@@ -161,3 +161,7 @@ Version 1.3.4 separates Quick-scan history from actual Deep-probe attempts, so u
 ## Version 1.3.5 local Matroska header staging
 
 Version 1.3.5 stops running ffprobe directly against MKV/WebM files on network shares. ReelIndex copies a bounded 2 MB header window (4 MB on retries) to local application storage in a killable child process, probes the temporary local fragment, calculates overall bitrate from the original file size and embedded duration, and deletes the fragment immediately. This avoids repeated SMB seeks while remaining read-only against the movie library.
+## Version 1.3.6 native Matroska analysis
+
+Version 1.3.6 parses Matroska/WebM EBML headers directly after copying a one-megabyte sequential header window to local storage. It extracts duration, video and audio codecs, resolution, channels, languages, frame rate, stream counts, and basic HDR signalling without launching ffprobe for normal MKV files. The parser expands to four megabytes only when the first header is incomplete, and ffprobe remains a bounded fallback for unusual or malformed containers. This removes truncated-fragment ffprobe stalls while keeping source media read-only.
+
