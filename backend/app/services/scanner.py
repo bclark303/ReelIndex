@@ -64,28 +64,48 @@ class PosterResult:
 
 
 class AnalyzerCircuitBreaker:
-    """Stop repeatedly launching an analyzer that is timing out for this scan."""
+    """Bound analyzer attempts and stop after repeated timeouts.
+
+    ``begin_attempt`` reserves one of the timeout budget slots. This prevents a
+    worker that just timed out from immediately launching another network probe
+    while the remaining workers are still timing out. A four-worker scan now
+    performs at most four doomed attempts instead of seven or more.
+    """
 
     def __init__(self, name: str, threshold: int = 4):
         self.name = name
         self.threshold = max(1, threshold)
         self._timeouts = 0
+        self._in_flight = 0
         self._disabled = False
         self._lock = threading.Lock()
 
+    def begin_attempt(self) -> bool:
+        with self._lock:
+            if self._disabled or self._timeouts + self._in_flight >= self.threshold:
+                return False
+            self._in_flight += 1
+            return True
+
     def available(self) -> bool:
         with self._lock:
-            return not self._disabled
+            return not self._disabled and self._timeouts + self._in_flight < self.threshold
 
     def record_success(self) -> None:
         with self._lock:
+            self._in_flight = max(0, self._in_flight - 1)
             self._timeouts = 0
 
-    def record_error(self, error: str | None) -> bool:
-        """Return True only when this call transitions the circuit to disabled."""
-        if not error or "timed out" not in error.lower():
-            return False
+    def release_attempt(self) -> None:
         with self._lock:
+            self._in_flight = max(0, self._in_flight - 1)
+
+    def record_error(self, error: str | None) -> bool:
+        """Release an attempt and report a transition to the disabled state."""
+        with self._lock:
+            self._in_flight = max(0, self._in_flight - 1)
+            if not error or "timed out" not in error.lower():
+                return False
             if self._disabled:
                 return False
             self._timeouts += 1
@@ -263,6 +283,7 @@ class ScanManager:
             source_type=source_type,
             mode=mode,
             verbose=verbose,
+            discovery_workers=getattr(adapter, "discovery_workers", settings.discovery_workers),
             probe_workers=settings.probe_workers,
             poster_workers=settings.poster_workers,
         )
@@ -311,6 +332,7 @@ class ScanManager:
             f"Discovery complete: {len(candidates):,} movies and {total_files:,} files in {discovery_elapsed:.2f}s",
             elapsed_ms=round(discovery_elapsed * 1000),
             files_per_second=round(total_files / discovery_elapsed, 2) if discovery_elapsed else None,
+            workers=getattr(adapter, "discovery_workers", 1),
         )
         tmdb_token = config.get("tmdb_token") or settings.tmdb_api_token
         probe_jobs: list[ProbeJob] = []
@@ -958,11 +980,16 @@ class ScanManager:
 
         quick: dict[str, Any] = {}
         quick_error: str | None = None
-        media_available = mediainfo_circuit is None or mediainfo_circuit.available()
-        if media_available:
+        media_attempt = mediainfo_circuit is None or mediainfo_circuit.begin_attempt()
+        if media_attempt:
             event("info", "mediainfo", f"Reading headers: {file_candidate.filename}")
             mediainfo_started = time.perf_counter()
-            quick, quick_error = analyze_media_quick(file_candidate.local_path, cancel_event)
+            try:
+                quick, quick_error = analyze_media_quick(file_candidate.local_path, cancel_event)
+            except BaseException:
+                if mediainfo_circuit:
+                    mediainfo_circuit.release_attempt()
+                raise
             if verbose:
                 elapsed = time.perf_counter() - mediainfo_started
                 event("debug", "timing", f"MediaInfo {elapsed:.3f}s: {file_candidate.filename}")
@@ -993,13 +1020,19 @@ class ScanManager:
         # Deep scans may use ffprobe, but stop launching it after a full worker
         # batch times out. FFmpeg documents probesize/analyzeduration as the knobs
         # that control probe latency; probe.py uses conservative bounded values.
-        if ffprobe_circuit is not None and not ffprobe_circuit.available():
+        ffprobe_attempt = ffprobe_circuit is None or ffprobe_circuit.begin_attempt()
+        if not ffprobe_attempt:
             error = "ffprobe skipped after repeated timeouts in this scan"
             return finish(quick or ScanManager._basic_file_technical(file_candidate, mode, error), error)
 
         event("warning" if quick_error else "info", "ffprobe", f"Using ffprobe fallback: {file_candidate.filename}")
         ffprobe_started = time.perf_counter()
-        probed, probe_error = probe_media(file_candidate.local_path, cancel_event)
+        try:
+            probed, probe_error = probe_media(file_candidate.local_path, cancel_event)
+        except BaseException:
+            if ffprobe_circuit:
+                ffprobe_circuit.release_attempt()
+            raise
         if verbose:
             elapsed = time.perf_counter() - ffprobe_started
             event("debug", "timing", f"ffprobe {elapsed:.3f}s: {file_candidate.filename}")

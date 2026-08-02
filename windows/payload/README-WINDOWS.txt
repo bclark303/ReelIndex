@@ -124,6 +124,10 @@ Open **Diagnostics → Maintenance**.
 Both actions require a typed confirmation and are disabled while a scan is active. Neither action changes media files or sidecar artwork/metadata.
 
 
-## Version 1.2.3 scan optimization
+## Version 1.2.4 scan optimization
 
-Version 1.2.3 uses MediaInfo's fastest parse mode, reduces the Quick-scan MediaInfo timeout to eight seconds, never launches ffprobe during a Quick scan, and stops launching an analyzer for the remainder of a scan after a full worker batch times out. Quick-scan analyzer failures are cached as filesystem-only metadata so unchanged files do not stall every later scan. Trailer, sample, and extras clips are excluded when a primary movie file is present.
+Version 1.2.4 uses MediaInfo's fastest parse mode, reduces the Quick-scan MediaInfo timeout to eight seconds, never launches ffprobe during a Quick scan, and stops launching an analyzer for the remainder of a scan after a full worker batch times out. Quick-scan analyzer failures are cached as filesystem-only metadata so unchanged files do not stall every later scan. Trailer, sample, and extras clips are excluded when a primary movie file is present.
+
+## Version 1.2.4 network discovery optimization
+
+Version 1.2.4 enumerates independent movie folders concurrently instead of waiting for one SMB directory round trip at a time. The default is eight bounded discovery workers and can be changed before launching ReelIndex with `REELINDEX_DISCOVERY_WORKERS`. MediaInfo and ffprobe circuit breakers also reserve attempt slots so a failed worker batch cannot immediately launch extra doomed probes.

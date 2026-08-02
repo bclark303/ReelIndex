@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     max_probe_seconds: int = 45
     max_mediainfo_seconds: int = 8
     probe_workers: int = 4
+    discovery_workers: int = 8
     poster_workers: int = 6
     scan_commit_interval: int = 50
     scan_verbose: bool = False

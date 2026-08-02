@@ -5,6 +5,8 @@ import os
 import re
 import shutil
 import xml.etree.ElementTree as ET
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -28,6 +30,12 @@ class FilesystemAdapter:
         configured = config.get("extensions")
         self.extensions = {str(item).lower() for item in configured} if configured else settings.extension_set
         self.follow_symlinks = bool(config.get("follow_symlinks", False))
+        configured_workers = config.get("discovery_workers", settings.discovery_workers)
+        try:
+            requested_workers = int(configured_workers)
+        except (TypeError, ValueError):
+            requested_workers = settings.discovery_workers
+        self.discovery_workers = max(1, min(requested_workers, 32))
 
     def test_connection(self) -> AdapterConnectionResult:
         if not self.root.exists():
@@ -45,126 +53,182 @@ class FilesystemAdapter:
         )
 
     def scan(self, progress: DiscoveryCallback | None = None) -> list[MovieCandidate]:
-        """Scan using one directory enumeration per folder.
+        """Scan folders concurrently while keeping each directory to one enumeration.
 
-        ``os.scandir`` keeps the number of SMB round trips low. Local artwork and
-        sidecar metadata are resolved from the same directory lookup rather than
-        performing another directory walk for every movie file.
+        Network shares spend most of their time waiting for SMB directory round trips.
+        Independent movie folders can safely be enumerated in parallel, which reduces
+        wall-clock discovery time without reading the movie contents. The worker count
+        is deliberately bounded so an Unraid array is not flooded with metadata I/O.
         """
         grouped: dict[str, MovieCandidate] = {}
-        pending = [os.fspath(self.root)]
+        pending_directories = deque([os.fspath(self.root)])
+        in_flight: dict[Future[tuple[list[str], dict[str, MovieCandidate]]], str] = {}
         discovered_files = 0
+        max_pending = max(self.discovery_workers, self.discovery_workers * 4)
+        executor = ThreadPoolExecutor(
+            max_workers=self.discovery_workers,
+            thread_name_prefix="reelindex-discovery",
+        )
 
-        while pending:
-            directory = pending.pop()
-            if progress:
-                # Besides updating the live location, this gives the scan manager
-                # a cancellation checkpoint even in trees containing empty folders.
-                progress(len(grouped), discovered_files, directory)
+        try:
+            while pending_directories or in_flight:
+                while pending_directories and len(in_flight) < max_pending:
+                    directory = pending_directories.popleft()
+                    if progress:
+                        # This callback doubles as the cancellation checkpoint.
+                        progress(len(grouped), discovered_files, directory)
+                    future = executor.submit(self._scan_directory, directory)
+                    in_flight[future] = directory
+
+                if not in_flight:
+                    continue
+
+                done, _ = wait(in_flight, timeout=0.1, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+
+                for future in done:
+                    directory = in_flight.pop(future)
+                    try:
+                        subdirectories, local_movies = future.result()
+                    except (FileNotFoundError, PermissionError, OSError):
+                        continue
+                    pending_directories.extend(subdirectories)
+
+                    for key, candidate in local_movies.items():
+                        existing = grouped.get(key)
+                        if existing is None:
+                            grouped[key] = candidate
+                        else:
+                            # The same title can appear in separate edition folders.
+                            existing.files.extend(candidate.files)
+                            if not existing.poster_ref and candidate.poster_ref:
+                                existing.poster_ref = candidate.poster_ref
+                            if not existing.overview and candidate.overview:
+                                existing.overview = candidate.overview
+                            if not existing.runtime_seconds and candidate.runtime_seconds:
+                                existing.runtime_seconds = candidate.runtime_seconds
+                            for meta_key, value in candidate.metadata.items():
+                                existing.metadata.setdefault(meta_key, value)
+                        discovered_files += len(candidate.files)
+
+                    if progress:
+                        progress(len(grouped), discovered_files, directory)
+        except BaseException:
+            for future in in_flight:
+                future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
+
+        movies = sorted(grouped.values(), key=lambda movie: (movie.title.lower(), movie.year or 0))
+        for movie in movies:
+            movie.files.sort(key=lambda item: item.filename.lower())
+        return movies
+
+    def _scan_directory(self, directory: str) -> tuple[list[str], dict[str, MovieCandidate]]:
+        """Enumerate and interpret one directory without touching media contents."""
+        folder_name = os.path.basename(os.path.normpath(directory))
+        if folder_name.lower() in _AUXILIARY_FOLDER_NAMES:
+            return [], {}
+
+        try:
+            with os.scandir(directory) as iterator:
+                entries = list(iterator)
+        except (FileNotFoundError, PermissionError, OSError):
+            return [], {}
+
+        subdirectories: list[str] = []
+        media_entries: list[os.DirEntry[str]] = []
+        file_lookup: dict[str, os.DirEntry[str]] = {}
+
+        for entry in entries:
+            if entry.name.startswith("."):
+                continue
             try:
-                with os.scandir(directory) as iterator:
-                    entries = list(iterator)
+                if entry.is_dir(follow_symlinks=self.follow_symlinks):
+                    if entry.name.lower() not in _AUXILIARY_FOLDER_NAMES and (
+                        self.follow_symlinks or not entry.is_symlink()
+                    ):
+                        subdirectories.append(entry.path)
+                    continue
+                if not entry.is_file(follow_symlinks=self.follow_symlinks):
+                    continue
+            except OSError:
+                continue
+
+            file_lookup[entry.name.lower()] = entry
+            if os.path.splitext(entry.name)[1].lower() in self.extensions:
+                media_entries.append(entry)
+
+        if not media_entries:
+            return subdirectories, {}
+
+        # Trailers, samples, and bonus clips are not movie editions. When a
+        # folder contains at least one primary movie file, exclude auxiliary clips.
+        primary_entries = [entry for entry in media_entries if not self._is_auxiliary_media(entry.name)]
+        if primary_entries:
+            media_entries = primary_entries
+
+        folder_is_movie = len(media_entries) <= 3
+        stems = [os.path.splitext(entry.name)[0] for entry in media_entries]
+        shared_sidecar = self._read_local_metadata_from_lookup(file_lookup, stems) if folder_is_movie else {}
+        shared_poster = (
+            self._find_local_poster_from_lookup(file_lookup, stems, folder_name, include_generic=True)
+            if folder_is_movie
+            else None
+        )
+        local_grouped: dict[str, MovieCandidate] = {}
+
+        for entry in media_entries:
+            try:
+                stat = entry.stat(follow_symlinks=self.follow_symlinks)
             except (FileNotFoundError, PermissionError, OSError):
                 continue
 
-            media_entries: list[os.DirEntry[str]] = []
-            file_lookup: dict[str, os.DirEntry[str]] = {}
-
-            for entry in entries:
-                if entry.name.startswith("."):
-                    continue
-                try:
-                    if entry.is_dir(follow_symlinks=self.follow_symlinks):
-                        if self.follow_symlinks or not entry.is_symlink():
-                            pending.append(entry.path)
-                        continue
-                    if not entry.is_file(follow_symlinks=self.follow_symlinks):
-                        continue
-                except OSError:
-                    continue
-
-                file_lookup[entry.name.lower()] = entry
-                if Path(entry.name).suffix.lower() in self.extensions:
-                    media_entries.append(entry)
-
-            if not media_entries:
-                continue
-
-            # Trailers, samples, and bonus clips are not movie editions. When a
-            # folder (or a flat library root) contains at least one primary movie
-            # file, exclude auxiliary clips before counting or technical analysis.
-            if Path(directory).name.lower() in _AUXILIARY_FOLDER_NAMES:
-                continue
-            primary_entries = [entry for entry in media_entries if not self._is_auxiliary_media(entry.name)]
-            if primary_entries:
-                media_entries = primary_entries
-
-            folder_is_movie = len(media_entries) <= 3
-            folder_name = Path(directory).name
-            stems = [Path(entry.name).stem for entry in media_entries]
-            shared_sidecar = self._read_local_metadata_from_lookup(file_lookup, stems) if folder_is_movie else {}
-            shared_poster = (
-                self._find_local_poster_from_lookup(file_lookup, stems, folder_name, include_generic=True)
+            path = Path(entry.path)
+            stem = os.path.splitext(entry.name)[0]
+            sidecar = shared_sidecar if folder_is_movie else self._read_local_metadata_from_lookup(file_lookup, [stem])
+            folder_poster = (
+                shared_poster
                 if folder_is_movie
-                else None
+                else self._find_local_poster_from_lookup(file_lookup, [stem], "", include_generic=False)
+            )
+            raw_title_source = folder_name if folder_is_movie else entry.name
+            title, year, folder_edition = clean_title(raw_title_source)
+            _, _, file_edition = clean_title(entry.name)
+            edition = file_edition or folder_edition or sidecar.get("edition")
+            key = normalized_movie_key(sidecar.get("title") or title, sidecar.get("year") or year)
+            movie = local_grouped.get(key)
+
+            if not movie:
+                metadata = {"origin": "filesystem", **sidecar}
+                movie = MovieCandidate(
+                    source_movie_id=stable_id(key),
+                    title=sidecar.get("title") or title,
+                    year=sidecar.get("year") or year,
+                    runtime_seconds=sidecar.get("runtime_seconds"),
+                    overview=sidecar.get("overview"),
+                    poster_ref=os.fspath(folder_poster) if folder_poster else None,
+                    metadata=metadata,
+                )
+                local_grouped[key] = movie
+
+            stable_path = os.path.normcase(os.path.abspath(entry.path))
+            movie.files.append(
+                FileCandidate(
+                    source_file_id=stable_id(stable_path),
+                    path=os.fspath(path),
+                    filename=entry.name,
+                    local_path=path,
+                    size_bytes=stat.st_size,
+                    modified_ts=stat.st_mtime,
+                    edition=edition,
+                )
             )
 
-            for entry in media_entries:
-                try:
-                    stat = entry.stat(follow_symlinks=self.follow_symlinks)
-                except (FileNotFoundError, PermissionError, OSError):
-                    continue
-
-                path = Path(entry.path)
-                sidecar = (
-                    shared_sidecar
-                    if folder_is_movie
-                    else self._read_local_metadata_from_lookup(file_lookup, [path.stem])
-                )
-                folder_poster = (
-                    shared_poster
-                    if folder_is_movie
-                    else self._find_local_poster_from_lookup(
-                        file_lookup, [path.stem], "", include_generic=False
-                    )
-                )
-                raw_title_source = folder_name if folder_is_movie else entry.name
-                title, year, folder_edition = clean_title(raw_title_source)
-                _, _, file_edition = clean_title(entry.name)
-                edition = file_edition or folder_edition or sidecar.get("edition")
-                key = normalized_movie_key(sidecar.get("title") or title, sidecar.get("year") or year)
-                movie = grouped.get(key)
-
-                if not movie:
-                    metadata = {"origin": "filesystem", **sidecar}
-                    movie = MovieCandidate(
-                        source_movie_id=stable_id(key),
-                        title=sidecar.get("title") or title,
-                        year=sidecar.get("year") or year,
-                        runtime_seconds=sidecar.get("runtime_seconds"),
-                        overview=sidecar.get("overview"),
-                        poster_ref=os.fspath(folder_poster) if folder_poster else None,
-                        metadata=metadata,
-                    )
-                    grouped[key] = movie
-
-                stable_path = os.path.normcase(os.path.abspath(entry.path))
-                movie.files.append(
-                    FileCandidate(
-                        source_file_id=stable_id(stable_path),
-                        path=os.fspath(path),
-                        filename=entry.name,
-                        local_path=path,
-                        size_bytes=stat.st_size,
-                        modified_ts=stat.st_mtime,
-                        edition=edition,
-                    )
-                )
-                discovered_files += 1
-                if progress:
-                    progress(len(grouped), discovered_files, directory)
-
-        return sorted(grouped.values(), key=lambda movie: (movie.title.lower(), movie.year or 0))
+        return subdirectories, local_grouped
 
     @staticmethod
     def _is_auxiliary_media(filename: str) -> bool:

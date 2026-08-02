@@ -122,3 +122,38 @@ def test_mediainfo_circuit_breaker_skips_later_quick_jobs(monkeypatch):
     assert calls["count"] == 2
     assert error is None
     assert result["analysis_source"] == "filesystem-fallback"
+
+
+def test_circuit_breaker_caps_simultaneous_timeout_attempts(monkeypatch):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    calls = {"count": 0}
+    lock = threading.Lock()
+
+    def timeout(*_args, **_kwargs):
+        with lock:
+            calls["count"] += 1
+        time.sleep(0.03)
+        return {}, "MediaInfo timed out after 8 seconds"
+
+    monkeypatch.setattr(scanner_module, "analyze_media_quick", timeout)
+    circuit = scanner_module.AnalyzerCircuitBreaker("MediaInfo", threshold=4)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(
+                ScanManager._analyze_file,
+                candidate(),
+                None,
+                "quick",
+                None,
+                False,
+                circuit,
+            )
+            for _ in range(20)
+        ]
+        [future.result() for future in futures]
+
+    assert calls["count"] == 4

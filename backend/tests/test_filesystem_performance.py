@@ -139,3 +139,36 @@ def test_filesystem_excludes_trailers_and_samples_when_movie_is_present(tmp_path
 
     assert len(results) == 1
     assert [item.filename for item in results[0].files] == ["Example Movie (2024) Bluray-1080p.mkv"]
+
+
+def test_network_discovery_parallelizes_independent_movie_folders(tmp_path, monkeypatch):
+    import time
+    import app.sources.filesystem as filesystem_module
+
+    for index in range(48):
+        folder = tmp_path / f"Movie {index:02d} (2024)"
+        folder.mkdir()
+        (folder / f"Movie {index:02d} (2024).mkv").write_bytes(b"video")
+
+    original_scandir = filesystem_module.os.scandir
+
+    def delayed_scandir(path):
+        # Simulate the latency of one SMB directory enumeration without changing
+        # the actual DirEntry behavior used by the adapter.
+        if Path(path) != tmp_path:
+            time.sleep(0.02)
+        return original_scandir(path)
+
+    monkeypatch.setattr(filesystem_module.os, "scandir", delayed_scandir)
+
+    started = time.perf_counter()
+    serial = FilesystemAdapter(str(tmp_path), {"discovery_workers": 1}).scan()
+    serial_elapsed = time.perf_counter() - started
+
+    started = time.perf_counter()
+    parallel = FilesystemAdapter(str(tmp_path), {"discovery_workers": 8}).scan()
+    parallel_elapsed = time.perf_counter() - started
+
+    assert len(serial) == len(parallel) == 48
+    assert [movie.title for movie in serial] == [movie.title for movie in parallel]
+    assert parallel_elapsed < serial_elapsed * 0.5
