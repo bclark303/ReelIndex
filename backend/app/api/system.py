@@ -22,6 +22,7 @@ from app.services.maintenance import MaintenanceBlocked, reset_application_data
 from app.services.mediainfo import mediainfo_version
 from app.services.probe import ffprobe_version
 from app.services.runtime_settings import runtime_settings
+from app.version import __version__
 
 router = APIRouter(tags=["system"])
 
@@ -45,7 +46,7 @@ def _maintenance_reset(*, confirmation: str, expected: str, include_sources: boo
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "app": settings.app_name, "version": "1.4.4"}
+    return {"status": "ok", "app": settings.app_name, "version": __version__, "edition": settings.edition}
 
 
 @router.get("/posters/{movie_id}")
@@ -66,7 +67,7 @@ def _diagnostics(db: Session) -> dict:
     scans = db.scalars(select(ScanRun).order_by(ScanRun.started_at.desc()).limit(20)).all()
     disk = shutil.disk_usage(settings.data_dir)
     return {
-        "app": {"name": settings.app_name, "version": "1.4.4", "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
+        "app": {"name": settings.app_name, "version": __version__, "edition": settings.edition, "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
         "system": {
             "platform": platform.platform(),
             "python": platform.python_version(),

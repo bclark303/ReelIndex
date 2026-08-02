@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     app_name: str = "ReelIndex"
+    edition: str = "Local"
     api_prefix: str = "/api"
     data_dir: Path = Path("/data")
     database_url: str | None = None

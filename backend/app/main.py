@@ -19,6 +19,7 @@ from app.core.database import SessionLocal, init_db
 from app.models import ScanRun
 from app.services.demo import seed_demo
 from app.services.scheduler import scan_scheduler
+from app.version import __version__
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -54,7 +55,7 @@ async def lifespan(app: FastAPI):
     scan_scheduler.shutdown()
 
 
-app = FastAPI(title=settings.app_name, version="1.4.4", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
 
 
 @app.middleware("http")

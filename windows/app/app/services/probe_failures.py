@@ -66,7 +66,7 @@ def diagnose_probe_failure(
             recommended_action="check_source",
             suggestions=(
                 "Confirm the file still exists at the displayed path.",
-                "For mapped drives, launch ReelIndex under the same Windows account that owns the mapping.",
+                "For mapped drives or container mounts, run ReelIndex with the same identity that can read the media path.",
                 "Prefer a UNC path or correct the server-to-local path mapping.",
             ),
         )
@@ -79,9 +79,9 @@ def diagnose_probe_failure(
             retryable=False,
             recommended_action="check_permissions",
             suggestions=(
-                "Grant the current Windows user read permission to the file and parent folders.",
+                "Grant the ReelIndex process identity read permission to the file and parent folders.",
                 "Check share permissions as well as NTFS permissions.",
-                "Retry after confirming the file opens from the same Windows account.",
+                "Retry after confirming the file opens from the same host account or container identity.",
             ),
         )
     if "ffprobe is not installed" in text or "ffprobe" in text and "not found" in text:
@@ -136,7 +136,7 @@ def diagnose_probe_failure(
             suggestions=(
                 "Confirm the NAS or external disk is online and healthy.",
                 "Retry while large transfers or parity checks are not running.",
-                "Check the Windows event log and storage health if the same file repeatedly fails.",
+                "Check the host or container logs and storage health if the same file repeatedly fails.",
             ),
         )
     if re.search(r"cancel|interrupted", text):

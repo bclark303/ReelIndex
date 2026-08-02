@@ -100,12 +100,17 @@ Manual TMDB poster search, image upload/removal, and scan-safe manual poster loc
 
 Probe Failures workspace with reason classification, attempt history, remediation guidance, and targeted retries.
 
+### v1.4.5
+
+Synchronized Windows, Docker, and Unraid on one backend and browser UI; added the current all-in-one image, GHCR multi-architecture publishing, upgrade-safe container startup, and shared release identity.
+
 ## Unraid releases
 
 - `unraid-v1.0.0` — original all-in-one Unraid package
 - `unraid-v1.0.1` — first numbered Unraid maintenance build
 - `unraid-v1.0.2` — second Unraid maintenance build
 - `unraid-v1.0.3` — icon, favicon, and packaging refinements
+- `v1.4.5` — Windows and Docker/Unraid converge on the same application source and feature set
 
 ## Auxiliary tool
 

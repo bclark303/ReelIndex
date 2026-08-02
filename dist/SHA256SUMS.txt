@@ -1,2 +1,4 @@
-895497f0493c0c2fda41bb2c72485f52cc3403e1f9beaee9e74f960f1f320d07  ReelIndex-Windows-Setup-v1.4.4.exe
-219d44c2eabe6999dbca37917229b1a54fdacf984fd9db6cdc0d6904869c652d  reelindex-windows-v1.4.4-update.zip
+7b27736d66db3a7a1a61aa4712d778c9a0893c74ab948afc3fbc0e3f95cce1ae  ReelIndex-Windows-Setup-v1.4.5.exe
+a6b8f25c423f5ddefafa77cc34f2828b6c5ea985a93fa86b289a5feccb1785af  reelindex-windows-v1.4.5-update.zip
+b29a41acca974f03dd3d480d83de4c9ffcddac9907c55a89ff4732ff4d1897d9  ReelIndex-Docker-Unraid-v1.4.5.zip
+9f837e04fcd8f01c17f4e2ec5622afe71044846aee7ca85a9902752ebbe659a1  ReelIndex-Unraid-Template-v1.4.5.xml

@@ -54,7 +54,8 @@
     uploadPoster:(id,file)=>{const form=new FormData();form.append('poster',file);return request(`/movies/${encodeURIComponent(id)}/poster/upload`,{method:'POST',body:form})},
     clearPoster:id=>request(`/movies/${encodeURIComponent(id)}/poster`,{method:'DELETE'}),
     probeFailures:q=>{const p=new URLSearchParams();Object.entries(q||{}).forEach(([k,v])=>{if(v!==undefined&&v!==''&&v!==false)p.set(k,String(v));});return request('/probe-failures?'+p)},
-    retryProbe:(id,strategy='auto')=>request(`/media-files/${encodeURIComponent(id)}/probe/retry`,{method:'POST',body:JSON.stringify({strategy})})
+    retryProbe:(id,strategy='auto')=>request(`/media-files/${encodeURIComponent(id)}/probe/retry`,{method:'POST',body:JSON.stringify({strategy})}),
+    health:()=>request('/health')
   };
   function loading(label='Loading'){ return `<div class="loading"><span class="spinner"></span><span>${esc(label)}</span></div>`; }
   function empty(title,message,action=''){ return `<div class="empty-state">${icon('film',42)}<h2>${esc(title)}</h2><p>${esc(message)}</p>${action}</div>`; }
@@ -334,5 +335,7 @@
 
   function valueGrid(data){return `<div class="diagnostic-grid">${Object.entries(data).map(([k,v])=>`<div class="diagnostic-value"><span>${esc(k.replaceAll('_',' '))}</span><strong>${esc(typeof v==='number'&&k.includes('disk')?fmtBytes(v):String(v??'—'))}</strong></div>`).join('')}</div>`;}
 
-  (async function init(){await loadSources();await loadScans();renderPage();schedulePoll();})();
+  async function loadReleaseIdentity(){try{const health=await api.health();const release=document.getElementById('release-label');const edition=document.getElementById('edition-label');if(release)release.textContent=`ReelIndex ${health.version||'1.4.5'}`;if(edition)edition.textContent=`${health.edition||'Local'} edition · AI-assisted, read-only inventory`;}catch(error){console.warn('Could not load release identity',error);}}
+
+  (async function init(){await loadReleaseIdentity();await loadSources();await loadScans();renderPage();schedulePoll();})();
 })();

@@ -1,0 +1,97 @@
+name: Docker image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/bclark303/reelindex
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify synchronized package copies
+        run: python scripts/sync-packages.py --check
+      - name: Build amd64 smoke image
+        run: docker build --pull --tag reelindex:smoke .
+      - name: Start smoke container
+        run: |
+          mkdir -p "${RUNNER_TEMP}/reelindex-data" "${RUNNER_TEMP}/reelindex-media"
+          docker run --detach --name reelindex-smoke \
+            --publish 18080:8080 \
+            --env PUID="$(id -u)" --env PGID="$(id -g)" \
+            --volume "${RUNNER_TEMP}/reelindex-data:/data" \
+            --volume "${RUNNER_TEMP}/reelindex-media:/media:ro" \
+            reelindex:smoke
+      - name: Validate health, tools, and shared UI
+        run: |
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:18080/api/health > health.json; then break; fi
+            sleep 1
+          done
+          python - <<'PY'
+          import json
+          payload = json.load(open('health.json', encoding='utf-8'))
+          assert payload['status'] == 'ok', payload
+          assert payload['version'] == '1.4.5', payload
+          assert payload['edition'] == 'Docker / Unraid', payload
+          PY
+          curl --fail --silent http://127.0.0.1:18080/ | grep -q 'ReelIndex 1.4.5'
+          docker exec reelindex-smoke ffprobe -version
+          docker exec reelindex-smoke mediainfo --Version
+          test -f "${RUNNER_TEMP}/reelindex-data/reelindex.db"
+          test -f "${RUNNER_TEMP}/reelindex-data/.secret_key"
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs reelindex-smoke || true
+      - name: Stop smoke container
+        if: always()
+        run: docker rm --force reelindex-smoke >/dev/null 2>&1 || true
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=unraid,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
