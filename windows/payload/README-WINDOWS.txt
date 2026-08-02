@@ -1,20 +1,15 @@
-ReelIndex Windows v1.4.1
+ReelIndex Windows v1.4.2
 
-Unified native-container analysis release.
+IMDb-aware poster matching release.
 
-Native-first deep analysis supports:
-- Matroska and WebM
-- MP4, M4V, and MOV
-- AVI
-- ASF and WMV
-- MPEG transport streams: TS, M2TS, and MTS
-- MPEG program streams: MPG and MPEG
+Poster resolution now:
+- Detects IMDb title IDs such as tt0078748 in movie titles, folder names,
+  filenames, paths, JSON metadata, and Kodi/Jellyfin NFO unique IDs.
+- Resolves those IDs directly through TMDB before attempting title search.
+- Removes appended IMDb IDs and common cp(...) markers from title-search text.
+- Retries title search without the year when a release-folder year is wrong.
+- Records the TMDB ID, IMDb ID, and poster match method in movie metadata.
 
-ffprobe remains installed as a bounded fallback for malformed, unusual, or
-incomplete files. Existing databases, source credentials, poster caches, scan
-history, and resumable deep queues are stored separately under
+Use Sources > Posters after upgrading. Existing databases, source credentials,
+poster caches, scan history, and resumable Deep Scan queues are stored under
 %LOCALAPPDATA%\ReelIndex and are preserved during an upgrade.
-
-v1.4.1 poster pipeline:
-Posters are resolved immediately after indexing. Use Sources > Posters to
-repair missing artwork without re-running technical analysis.

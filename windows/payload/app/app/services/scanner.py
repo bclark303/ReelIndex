@@ -29,7 +29,7 @@ from app.services.mediainfo import MediaInfoCancelled, analyze_media_quick
 from app.services.probe import ProbeCancelled, probe_media
 from app.services.scan_events import scan_event_store
 from app.services.runtime_settings import runtime_settings
-from app.services.tmdb import TmdbClient
+from app.services.tmdb import TmdbClient, extract_imdb_id
 from app.sources.factory import create_adapter
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,8 @@ class PosterResult:
     found: bool
     overview: str | None = None
     tmdb_id: int | None = None
+    imdb_id: str | None = None
+    match_method: str | None = None
 
 
 class AnalyzerCircuitBreaker:
@@ -1351,18 +1353,29 @@ class ScanManager:
                             movie.poster_path = str(job.destination)
                             if not movie.overview and result.overview:
                                 movie.overview = result.overview
-                            if result.tmdb_id:
+                            if result.tmdb_id or result.imdb_id or result.match_method:
                                 try:
                                     metadata = json.loads(movie.metadata_json or "{}")
                                 except json.JSONDecodeError:
                                     metadata = {}
-                                metadata["tmdb_id"] = result.tmdb_id
+                                if result.tmdb_id:
+                                    metadata["tmdb_id"] = result.tmdb_id
+                                if result.imdb_id:
+                                    metadata["imdb_id"] = result.imdb_id
+                                if result.match_method:
+                                    metadata["poster_match"] = result.match_method
+                                    metadata["poster_source"] = "tmdb"
                                 movie.metadata_json = json.dumps(metadata)
+                            match_suffix = (
+                                f" · IMDb {result.imdb_id}"
+                                if result.match_method == "imdb" and result.imdb_id
+                                else ""
+                            )
                             scan_event_store.append(
                                 run_id,
                                 "success",
                                 "poster",
-                                f"Poster ready: {job.title}",
+                                f"Poster ready: {job.title}{match_suffix}",
                             )
                         elif not result.found and verbose:
                             scan_event_store.append(
@@ -1379,6 +1392,8 @@ class ScanManager:
                                 f"Poster job finished in {queued_elapsed:.3f}s: {job.title}",
                                 elapsed_ms=round(queued_elapsed * 1000),
                                 found=result.found,
+                                match_method=result.match_method,
+                                imdb_id=result.imdb_id,
                             )
                         run.current_item = f"Posters · {completed:,}/{len(jobs):,} · {job.title}"
                         if completed % settings.scan_commit_interval == 0:
@@ -1466,13 +1481,25 @@ class ScanManager:
 
             if tmdb_token:
                 tmdb = TmdbClient(tmdb_token)
-                result = tmdb.find_movie(candidate.title, candidate.year)
+                imdb_id = extract_imdb_id(
+                    candidate.metadata,
+                    candidate.title,
+                    [getattr(item, "filename", None) for item in candidate.files],
+                    [getattr(item, "path", None) for item in candidate.files],
+                )
+                result = tmdb.find_movie(candidate.title, candidate.year, imdb_id=imdb_id)
                 if cancel_event and cancel_event.is_set():
                     return PosterResult(False)
                 if result:
                     discard_temporary()
                     if tmdb.download_poster(result.get("poster_path"), temporary) and commit_temporary():
-                        return PosterResult(True, overview=result.get("overview"), tmdb_id=result.get("id"))
+                        return PosterResult(
+                            True,
+                            overview=result.get("overview"),
+                            tmdb_id=result.get("id"),
+                            imdb_id=result.get("_reelindex_imdb_id") or imdb_id,
+                            match_method=result.get("_reelindex_match"),
+                        )
             return PosterResult(False)
         finally:
             discard_temporary()
