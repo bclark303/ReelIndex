@@ -4,3 +4,6 @@ b29a41acca974f03dd3d480d83de4c9ffcddac9907c55a89ff4732ff4d1897d9  ReelIndex-Dock
 4d69f6b9205e07a1cdbd78c307f766e751323db6e052289e05e9625e9bcd8a29  ReelIndex-Windows-Setup-v1.4.8.1.exe
 4e696a5fd52bd9f613061b975c9f31f11e5c708e49725efcf726d91a2ab2c73c  ReelIndex-Windows-Setup-v1.4.8.1.defender.json
 
+1628acb5fec12f856744a67f560131f13ce2effa532b1682469ba0ccb2f1a47c  ReelIndex-Windows-Setup-v1.4.8.2.exe
+aac74aa9bb41269a19cca9d2c162752cbc7a14f3733a4c254fb8c9a7f0afe066  ReelIndex-Windows-Setup-v1.4.8.2.defender.json
+
