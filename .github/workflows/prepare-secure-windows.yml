@@ -1,0 +1,87 @@
+name: Prepare secure Windows release
+
+on:
+  push:
+    branches: [secure/offline-windows-installer]
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: ${{ !contains(github.event.head_commit.message, '[prepared]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Synchronize v1.4.9 release files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          replacements = [
+              'README.md',
+              'Dockerfile',
+              'docker-compose.yml',
+              'backend/app/version.py',
+              'backend/pyproject.toml',
+              'backend/tests/test_release_identity.py',
+              'web/index.html',
+          ]
+          for relative in replacements:
+              path = Path(relative)
+              text = path.read_text(encoding='utf-8')
+              if '1.4.8' not in text:
+                  raise SystemExit(f'{relative}: expected 1.4.8 release identity')
+              path.write_text(text.replace('1.4.8', '1.4.9'), encoding='utf-8')
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          replacement = '''## Download for Windows
+
+Download the Defender-scanned offline installer from
+[`dist/ReelIndex-Windows-Setup-v1.4.9.exe`](dist/ReelIndex-Windows-Setup-v1.4.9.exe).
+The corresponding Microsoft Defender scan record is
+[`dist/ReelIndex-Windows-Setup-v1.4.9.defender.json`](dist/ReelIndex-Windows-Setup-v1.4.9.defender.json).
+
+The installer bundles its Python runtime and dependencies, verifies an embedded
+SHA-256 payload manifest, and performs no network access or PowerShell execution
+on the user device. It remains unsigned until an Authenticode certificate is
+available, so SmartScreen can still display an unknown-publisher warning. Never
+bypass an antivirus malware detection.
+
+Requirements:
+
+- Windows 10 or Windows 11, 64-bit
+- A movie folder, mapped drive, UNC share, Plex server, Jellyfin server, or Emby server
+- A read-only server token when using a media-server source
+
+The installer does not require administrator rights and installs for the current
+Windows user.
+
+## Docker and Unraid'''
+          pattern = r'## Windows download temporarily quarantined\n.*?\n## Docker and Unraid'
+          text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit('README quarantine section was not found')
+          readme.write_text(text, encoding='utf-8')
+          PY
+          python scripts/sync-packages.py
+          python scripts/sync-packages.py --check
+      - name: Commit prepared release files
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md Dockerfile docker-compose.yml VERSION \
+            backend/app backend/pyproject.toml backend/tests/test_release_identity.py \
+            web windows/app windows/web windows/installer scripts
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'Prepare secure Windows v1.4.9 release [prepared]'
+          git push
