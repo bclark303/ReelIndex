@@ -22,6 +22,12 @@ def utcnow() -> datetime:
 def normalize_title(value: str | None) -> str:
     """Return a stable title token suitable for cross-source comparisons."""
     text = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    # Filesystem folder names commonly preserve an IMDb ID and sort articles at
+    # the end (for example ``12 Angry Men tt0050083`` or ``Abyss, The``).
+    text = re.sub(r"\btt\d{5,}\b", " ", text)
+    article = re.fullmatch(r"\s*(.*?)\s*,\s*(the|an|a)\s*", text)
+    if article:
+        text = f"{article.group(2)} {article.group(1)}"
     return "".join(character for character in text if character.isalnum())
 
 
@@ -113,6 +119,45 @@ def strong_file_identity_keys(candidate_or_file: Any) -> set[str]:
     return {key for key in file_identity_keys(candidate_or_file) if key.startswith("path:")}
 
 
+_MIN_TRUSTED_CONTENT_SIZE = 64 * 1024 * 1024
+_GENERIC_CONTENT_STEMS = {
+    "movie", "video", "feature", "main", "title", "file", "media",
+    "sample", "trailer", "preview", "teaser", "extra", "extras", "bonus",
+    "disc1", "disc2", "disk1", "disk2", "cd1", "cd2", "part1", "part2",
+}
+_EXCLUDED_CONTENT_TOKENS = {"sample", "trailer", "preview", "teaser", "featurette", "extras", "bonus"}
+
+
+def trusted_content_identity_keys(candidate_or_file: Any) -> set[str]:
+    """Exact filename/size keys suitable for cross-source movie matching.
+
+    Paths exposed by Plex/Jellyfin/Emby often differ from the container's
+    filesystem path. An exact basename and byte count is therefore the shared
+    physical signal, but only for substantial, non-generic feature files.
+    """
+    _paths, filename, size, _modified = _file_values(candidate_or_file)
+    if not filename or size is None or size < _MIN_TRUSTED_CONTENT_SIZE:
+        return set()
+    normalized_name = Path(filename.replace("\\", "/")).name.casefold()
+    stem = Path(normalized_name).stem
+    compact = re.sub(r"[^a-z0-9]+", "", stem)
+    tokens = {token for token in re.split(r"[^a-z0-9]+", stem) if token}
+    if len(compact) < 4 or compact in _GENERIC_CONTENT_STEMS or tokens & _EXCLUDED_CONTENT_TOKENS:
+        return set()
+    return {f"name-size:{normalized_name}:{int(size)}"}
+
+
+def content_identity_compatible(left: Any, right: Any) -> bool:
+    """Guard a content-signature match against conflicting movie metadata."""
+    left_year = getattr(left, "year", None)
+    right_year = getattr(right, "year", None)
+    if left_year and right_year:
+        return int(left_year) == int(right_year)
+    left_title = normalize_title(getattr(left, "title", None))
+    right_title = normalize_title(getattr(right, "title", None))
+    return bool(left_title and left_title == right_title)
+
+
 def candidate_fingerprint(candidate: Any) -> str:
     """Fingerprint content independently of the adapter's external IDs."""
     paths, filename, size, modified = _file_values(candidate)
@@ -191,8 +236,8 @@ class LibraryIdentityIndex:
             getattr(candidate, "runtime_seconds", None),
             metadata,
         )
-        # Provider IDs are strongest, followed by a physical-file match and then
-        # normalized title/year or title/runtime.
+        # Provider IDs are strongest, followed by a physical path, a guarded
+        # exact filename/byte-size signature, and finally normalized title metadata.
         external_keys = sorted(key for key in keys if key.startswith(("imdb:", "tmdb:")))
         fallback_keys = sorted(key for key in keys if key not in external_keys)
         for key in external_keys:
@@ -203,6 +248,11 @@ class LibraryIdentityIndex:
             for key in strong_file_identity_keys(file_candidate):
                 media_file = self.file_keys.get(key)
                 if media_file is not None:
+                    return media_file.movie, None
+        for file_candidate in getattr(candidate, "files", []) or []:
+            for key in trusted_content_identity_keys(file_candidate):
+                media_file = self.file_keys.get(key)
+                if media_file is not None and content_identity_compatible(candidate, media_file.movie):
                     return media_file.movie, None
         for key in fallback_keys:
             movie = self.movie_keys.get(key)
@@ -450,6 +500,39 @@ def consolidate_existing_duplicates(db: Session) -> int:
             merged_count += 1
         for key in keys:
             identity_owner[key] = canonical
+
+    db.flush()
+    movies = db.scalars(
+        select(Movie)
+        .options(
+            selectinload(Movie.source_links),
+            selectinload(Movie.files).selectinload(MediaFile.source_links),
+        )
+        .order_by(Movie.created_at, Movie.id)
+    ).all()
+    # Repair already-created cross-source duplicates whose server and
+    # filesystem paths differ but whose substantial feature file has the exact
+    # same basename and byte count. Conflicting years and generic extras remain
+    # separate.
+    content_groups: dict[str, list[Movie]] = defaultdict(list)
+    for movie in movies:
+        for media_file in movie.files:
+            for key in trusted_content_identity_keys(media_file):
+                content_groups[key].append(movie)
+    for group in content_groups.values():
+        unique = list({movie.id: movie for movie in group}.values())
+        if len(unique) < 2:
+            continue
+        canonical = unique[0]
+        for duplicate in unique[1:]:
+            if canonical not in db or duplicate not in db:
+                continue
+            if _source_ids(canonical) & _source_ids(duplicate):
+                continue
+            if not content_identity_compatible(canonical, duplicate):
+                continue
+            canonical = merge_movies(db, canonical, duplicate)
+            merged_count += 1
 
     db.flush()
     movies = db.scalars(
