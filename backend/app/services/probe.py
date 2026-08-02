@@ -13,6 +13,9 @@ from typing import Any, Literal
 from app.core.config import settings
 from app.services.media_utils import resolution_label
 from app.services.matroska import MatroskaParseError, parse_matroska_header
+from app.services.container_native import (
+    NATIVE_SUFFIXES, NativeContainerError, NativeSample, parse_native_container,
+)
 
 ProbeProfile = Literal["standard", "extended"]
 
@@ -117,6 +120,95 @@ def _stage_header_copy(
             "Matroska header staging returned too little data"
         )
     return temporary, copied, time.perf_counter() - started, None
+
+
+def _stage_container_sample(
+    source: Path,
+    head_limit: int,
+    tail_limit: int,
+    timeout: int,
+    cancel_event: threading.Event | None = None,
+) -> tuple[Path | None, int, int, float, str | None]:
+    """Copy bounded head/tail windows locally using a killable child process."""
+    stage_dir = settings.data_dir / "probe-stage"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix="reelindex-sample-", suffix=source.suffix.lower(), dir=stage_dir
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    script = (
+        "import json, os, sys\n"
+        "source, destination = sys.argv[1], sys.argv[2]\n"
+        "head_limit, tail_limit = int(sys.argv[3]), int(sys.argv[4])\n"
+        "size = os.path.getsize(source)\n"
+        "head = tail = 0\n"
+        "with open(source, 'rb', buffering=0) as src, open(destination, 'wb', buffering=0) as dst:\n"
+        "    remaining = min(head_limit, size)\n"
+        "    while remaining > 0:\n"
+        "        block = src.read(min(262144, remaining))\n"
+        "        if not block: break\n"
+        "        dst.write(block); head += len(block); remaining -= len(block)\n"
+        "    if tail_limit > 0 and size > head:\n"
+        "        tail_start = max(head, size - tail_limit)\n"
+        "        src.seek(tail_start)\n"
+        "        remaining = size - tail_start\n"
+        "        while remaining > 0:\n"
+        "            block = src.read(min(262144, remaining))\n"
+        "            if not block: break\n"
+        "            dst.write(block); tail += len(block); remaining -= len(block)\n"
+        "print(json.dumps({'head': head, 'tail': tail, 'size': size}))\n"
+    )
+    started = time.perf_counter()
+    try:
+        result = _run_hidden(
+            [sys.executable, "-c", script, str(source), str(temporary), str(head_limit), str(tail_limit)],
+            timeout,
+            cancel_event,
+        )
+    except subprocess.TimeoutExpired:
+        temporary.unlink(missing_ok=True)
+        return None, 0, 0, time.perf_counter() - started, (
+            f"Native sample staging timed out after {timeout} seconds"
+        )
+    except FileNotFoundError as exc:
+        temporary.unlink(missing_ok=True)
+        return None, 0, 0, time.perf_counter() - started, str(exc)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    if result.returncode != 0:
+        temporary.unlink(missing_ok=True)
+        return None, 0, 0, time.perf_counter() - started, (
+            result.stderr or "Native sample staging failed"
+        ).strip()[:2000]
+    try:
+        metadata = json.loads(result.stdout.strip().splitlines()[-1])
+        head_bytes = int(metadata.get("head") or 0)
+        tail_bytes = int(metadata.get("tail") or 0)
+    except (ValueError, json.JSONDecodeError, IndexError):
+        temporary.unlink(missing_ok=True)
+        return None, 0, 0, time.perf_counter() - started, "Native sample staging returned invalid metadata"
+    if head_bytes < 32:
+        temporary.unlink(missing_ok=True)
+        return None, head_bytes, tail_bytes, time.perf_counter() - started, "Native sample staging returned too little data"
+    return temporary, head_bytes, tail_bytes, time.perf_counter() - started, None
+
+
+def _native_sample_limits(path: Path, profile: ProbeProfile) -> list[tuple[int, int]]:
+    mib = 1024 * 1024
+    suffix = path.suffix.lower()
+    if suffix in {".mp4", ".m4v", ".mov"}:
+        return [(2 * mib, 4 * mib), (4 * mib, 16 * mib)] if profile == "standard" else [(8 * mib, 32 * mib)]
+    if suffix == ".avi":
+        return [(2 * mib, 0), (8 * mib, 0)] if profile == "standard" else [(16 * mib, 0)]
+    if suffix in {".wmv", ".asf"}:
+        return [(2 * mib, 0), (8 * mib, 0)] if profile == "standard" else [(16 * mib, 0)]
+    if suffix in {".ts", ".m2ts", ".mts"}:
+        return [(4 * mib, 4 * mib)] if profile == "standard" else [(12 * mib, 12 * mib)]
+    if suffix in {".mpg", ".mpeg"}:
+        return [(2 * mib, 2 * mib)] if profile == "standard" else [(8 * mib, 8 * mib)]
+    return []
 
 
 class ProbeCancelled(RuntimeError):
@@ -252,7 +344,7 @@ def normalize_ffprobe(raw: dict[str, Any], profile: ProbeProfile) -> dict[str, A
     return normalized
 
 
-def _matroska_core_complete(value: dict[str, Any]) -> bool:
+def _core_complete(value: dict[str, Any]) -> bool:
     required = (
         "duration_seconds",
         "video_codec",
@@ -272,7 +364,7 @@ def _merge_probe_values(primary: dict[str, Any], fallback: dict[str, Any]) -> di
         if merged.get(key) in (None, "") and value not in (None, ""):
             merged[key] = value
     merged["raw"] = {
-        "matroska_header": primary.get("raw"),
+        "native": primary.get("raw"),
         "ffprobe": fallback.get("raw"),
     }
     return merged
@@ -287,6 +379,7 @@ def probe_media(
     stage_matroska: bool = False,
     stage_bytes: int | None = None,
     source_size_bytes: int | None = None,
+    native_container: bool = False,
 ) -> tuple[dict[str, Any], str | None]:
     probe_size, analyze_duration, timeout = _probe_limits(path, profile)
     if timeout_override is not None:
@@ -299,7 +392,56 @@ def probe_media(
     copied_bytes = 0
     native: dict[str, Any] = {}
     native_error: str | None = None
-    is_matroska = path.suffix.lower() in {".mkv", ".webm"}
+    native_attempted = False
+    suffix = path.suffix.lower()
+    is_matroska = suffix in {".mkv", ".webm"}
+
+    if native_container and suffix in NATIVE_SUFFIXES:
+        native_attempted = True
+        limits = _native_sample_limits(path, profile)
+        parse_errors: list[str] = []
+        for index, (head_limit, tail_limit) in enumerate(limits):
+            sample_path, head_bytes, tail_bytes, elapsed, stage_error = _stage_container_sample(
+                path, head_limit, tail_limit, settings.deep_probe_stage_seconds, cancel_event
+            )
+            stage_elapsed += elapsed
+            if stage_error or not sample_path:
+                parse_errors.append(stage_error or "Native sample staging failed")
+                continue
+            parse_started = time.perf_counter()
+            try:
+                blob = sample_path.read_bytes()
+                parsed = parse_native_container(
+                    path,
+                    NativeSample(
+                        head=blob[:head_bytes],
+                        tail=blob[head_bytes:head_bytes + tail_bytes],
+                        source_size=source_size_bytes,
+                    ),
+                )
+                native_elapsed += time.perf_counter() - parse_started
+                native = _merge_probe_values(native, parsed) if native else parsed
+            except (NativeContainerError, OSError) as exc:
+                native_elapsed += time.perf_counter() - parse_started
+                parse_errors.append(str(exc))
+            finally:
+                sample_path.unlink(missing_ok=True)
+            if native:
+                native["probe_transport"] = f"native-{native.get('container') or suffix.lstrip('.')}"
+                native["probe_profile"] = profile
+                native["probe_diagnostics"] = {
+                    "staged_head_bytes": head_bytes,
+                    "staged_tail_bytes": tail_bytes,
+                    "staging_seconds": round(stage_elapsed, 3),
+                    "native_parse_seconds": round(native_elapsed, 4),
+                    "local_probe_seconds": 0.0,
+                    "stage_passes": index + 1,
+                }
+                if isinstance(native.get("raw"), dict):
+                    native["raw"]["reelindex_staging"] = native["probe_diagnostics"]
+                if _core_complete(native):
+                    return native, None
+        native_error = "; ".join(dict.fromkeys(parse_errors))[:2000] or "Native parser returned incomplete metadata"
 
     if stage_matroska and is_matroska:
         initial_limit = max(65536, int(stage_bytes or settings.deep_probe_stage_bytes))
@@ -356,7 +498,7 @@ def probe_media(
                 }
                 if isinstance(native.get("raw"), dict):
                     native["raw"]["reelindex_staging"] = native["probe_diagnostics"]
-                if _matroska_core_complete(native):
+                if _core_complete(native):
                     staged_path.unlink(missing_ok=True)
                     return native, None
 
@@ -428,17 +570,22 @@ def probe_media(
     normalized = normalize_ffprobe(raw, profile)
     if native:
         normalized = _merge_probe_values(native, normalized)
-    if staged_path or native:
+    if staged_path or native or native_attempted:
         duration = normalized.get("duration_seconds")
         if source_size_bytes and duration:
             normalized["video_bitrate"] = int((int(source_size_bytes) * 8) / float(duration))
+        existing_transport = str(native.get("probe_transport") or "") if native else ""
         normalized["probe_transport"] = (
-            "native-matroska-header+ffprobe" if native else "local-matroska-header"
+            f"{existing_transport}+ffprobe" if existing_transport else
+            "native-matroska-header+ffprobe" if native and is_matroska else
+            "native-fallback+ffprobe" if native_attempted else "local-matroska-header"
         )
+        native_diagnostics = dict(native.get("probe_diagnostics") or {}) if native else {}
         normalized["probe_diagnostics"] = {
-            "staged_header_bytes": copied_bytes,
-            "staging_seconds": round(stage_elapsed, 3),
-            "native_parse_seconds": round(native_elapsed, 4),
+            **native_diagnostics,
+            "staged_header_bytes": copied_bytes or native_diagnostics.get("staged_header_bytes", 0),
+            "staging_seconds": round(stage_elapsed, 3) or native_diagnostics.get("staging_seconds", 0),
+            "native_parse_seconds": round(native_elapsed, 4) or native_diagnostics.get("native_parse_seconds", 0),
             "local_probe_seconds": round(probe_elapsed, 3),
         }
         if isinstance(normalized.get("raw"), dict):

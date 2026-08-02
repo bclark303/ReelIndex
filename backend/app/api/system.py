@@ -45,7 +45,7 @@ def _maintenance_reset(*, confirmation: str, expected: str, include_sources: boo
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "app": settings.app_name, "version": "1.3.6"}
+    return {"status": "ok", "app": settings.app_name, "version": "1.4.0"}
 
 
 @router.get("/posters/{movie_id}")
@@ -66,7 +66,7 @@ def _diagnostics(db: Session) -> dict:
     scans = db.scalars(select(ScanRun).order_by(ScanRun.started_at.desc()).limit(20)).all()
     disk = shutil.disk_usage(settings.data_dir)
     return {
-        "app": {"name": settings.app_name, "version": "1.3.6", "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
+        "app": {"name": settings.app_name, "version": "1.4.0", "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
         "system": {
             "platform": platform.platform(),
             "python": platform.python_version(),
@@ -77,6 +77,11 @@ def _diagnostics(db: Session) -> dict:
             "probe_workers": settings.probe_workers,
             "deep_standard_timeout": settings.deep_probe_standard_seconds,
             "deep_retry_timeout": settings.deep_probe_retry_seconds,
+            "native_container_parsers": [
+                "Matroska/WebM", "MP4/M4V/MOV", "AVI", "ASF/WMV",
+                "MPEG-TS/M2TS", "MPEG-PS/MPG",
+            ],
+            "native_analysis_version": settings.deep_analysis_version,
             "data_disk_total": disk.total,
             "data_disk_free": disk.free,
         },

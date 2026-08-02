@@ -25,11 +25,11 @@ class Settings(BaseSettings):
     deep_probe_retry_stage_bytes: int = 4 * 1024 * 1024
     deep_probe_stage_seconds: int = 5
     deep_probe_local_seconds: int = 2
-    # Retained for compatibility with older environment files. v1.3.6 does not
+    # Retained for compatibility with older environment files. v1.4.0 does not
     # sleeps or launches explicit recovery canaries between timeout clusters.
     deep_probe_recovery_attempts: int = 3
     deep_probe_recovery_delay_seconds: float = 2.0
-    deep_analysis_version: int = 2
+    deep_analysis_version: int = 3
     max_mediainfo_seconds: int = 8
     probe_workers: int = 4
     discovery_workers: int = 8
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     mediainfo_path: str = "mediainfo"
     static_dir: Path | None = None
     windows_mode: bool = False
-    allowed_extensions: str = ".mkv,.mp4,.m4v,.avi,.mov,.wmv,.ts,.m2ts,.webm,.mpg,.mpeg"
+    allowed_extensions: str = ".mkv,.mp4,.m4v,.avi,.mov,.wmv,.asf,.ts,.m2ts,.mts,.webm,.mpg,.mpeg"
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="REELINDEX_", extra="ignore")
 

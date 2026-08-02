@@ -831,7 +831,7 @@ class ScanManager:
 
         def container_group(job: ProbeJob) -> str:
             suffix = Path(job.filename).suffix.lower()
-            if suffix in {".mp4", ".m4v", ".mov", ".avi", ".wmv"}:
+            if suffix in {".mp4", ".m4v", ".mov", ".avi", ".wmv", ".asf"}:
                 return "fast"
             if suffix in {".mkv", ".webm"}:
                 return "matroska"
@@ -979,6 +979,7 @@ class ScanManager:
 
                         record = db.get(MediaFile, job.record_id)
                         if record:
+                            self._apply_embedded_cover(db, record, technical)
                             self._apply_technical(record, technical, error)
 
                         if error:
@@ -1601,7 +1602,10 @@ class ScanManager:
         status = marker.get("status")
         if status in {"failed", "deferred"}:
             return False
-        return cached_mode in {"deep", "server"} or source in {"ffprobe", "media-server", "mediainfo+ffprobe", "ffprobe-standard", "ffprobe-extended", "matroska-native"}
+        return cached_mode in {"deep", "server"} or source in {
+            "ffprobe", "media-server", "mediainfo+ffprobe", "ffprobe-standard",
+            "ffprobe-extended", "matroska-native", "native-container",
+        }
 
     @staticmethod
     def _needs_deep_fallback(technical: dict[str, Any]) -> bool:
@@ -1643,9 +1647,11 @@ class ScanManager:
             "avi": "avi",
             "ts": "mpegts",
             "m2ts": "mpegts",
+            "mts": "mpegts",
             "mpg": "mpeg",
             "mpeg": "mpeg",
             "wmv": "asf",
+            "asf": "asf",
         }
         filename = file_candidate.filename.lower()
         resolution = None
@@ -1767,18 +1773,24 @@ class ScanManager:
         )
         suffix = Path(file_candidate.filename).suffix.lower()
         stage_matroska = suffix in {".mkv", ".webm"}
-        # Native Matroska parsing always begins with the smallest header window
-        # and expands locally only when the header is genuinely incomplete.
+        native_container = suffix in {
+            ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".asf",
+            ".ts", ".m2ts", ".mts", ".mpg", ".mpeg",
+        }
+        # Native parsers read bounded sequential windows and only use ffprobe
+        # when required fields remain unavailable.
         stage_bytes = settings.deep_probe_stage_bytes
         if stage_matroska:
             event(
                 "info",
-                "ffprobe",
+                "native",
                 (
                     f"Native Matroska header scan ({stage_bytes // (1024 * 1024)} MB initial): "
                     f"{file_candidate.filename}"
                 ),
             )
+        elif native_container:
+            event("info", "native", f"Native {suffix.lstrip('.').upper()} scan: {file_candidate.filename}")
         else:
             event(
                 "info",
@@ -1795,6 +1807,7 @@ class ScanManager:
                 stage_matroska=stage_matroska,
                 stage_bytes=stage_bytes,
                 source_size_bytes=file_candidate.size_bytes,
+                native_container=native_container,
             )
         except BaseException:
             if ffprobe_circuit:
@@ -1804,8 +1817,8 @@ class ScanManager:
             elapsed = time.perf_counter() - standard_started
             diagnostics = standard.get("probe_diagnostics") if standard else None
             transport = standard.get("probe_transport") if standard else None
-            if transport and transport.startswith("native-matroska-header"):
-                event("debug", "timing", f"Native Matroska analysis {elapsed:.3f}s: {file_candidate.filename}")
+            if transport and transport.startswith("native-"):
+                event("debug", "timing", f"Native container analysis {elapsed:.3f}s: {file_candidate.filename}")
             else:
                 event("debug", "timing", f"ffprobe standard {elapsed:.3f}s: {file_candidate.filename}")
             if diagnostics:
@@ -1813,7 +1826,7 @@ class ScanManager:
                     "debug",
                     "timing",
                     (
-                        f"Matroska staging {diagnostics.get('staging_seconds', 0):.3f}s + "
+                        f"Native staging {diagnostics.get('staging_seconds', 0):.3f}s + "
                         f"native parse {diagnostics.get('native_parse_seconds', 0):.4f}s + "
                         f"fallback probe {diagnostics.get('local_probe_seconds', 0):.3f}s: "
                         f"{file_candidate.filename}"
@@ -1839,10 +1852,9 @@ class ScanManager:
 
         if ffprobe_circuit:
             ffprobe_circuit.record_success()
+        transport_name = str(standard.get("probe_transport") or "")
         analysis_source = (
-            "matroska-native"
-            if str(standard.get("probe_transport") or "").startswith("native-matroska-header")
-            else "ffprobe-standard"
+            "native-container" if transport_name.startswith("native-") else "ffprobe-standard"
         )
         standard.update({
             "analysis_source": analysis_source,
@@ -1870,6 +1882,7 @@ class ScanManager:
                 stage_matroska=stage_matroska,
                 stage_bytes=max(stage_bytes, settings.deep_probe_retry_stage_bytes),
                 source_size_bytes=file_candidate.size_bytes,
+                native_container=native_container,
             )
         except BaseException:
             if ffprobe_circuit:
@@ -1895,6 +1908,34 @@ class ScanManager:
             ffprobe_circuit.record_error(extended_error)
         standard["analysis_warning"] = extended_error
         return finish(standard, None)
+
+    @staticmethod
+    def _apply_embedded_cover(db: Session, record: MediaFile, technical: dict[str, Any]) -> None:
+        cover = technical.pop("_embedded_cover", None)
+        if not isinstance(cover, dict):
+            return
+        data = cover.get("data")
+        if not isinstance(data, (bytes, bytearray)) or len(data) < 100:
+            return
+        movie = db.get(Movie, record.movie_id)
+        if not movie:
+            return
+        destination = settings.data_dir / "posters" / movie.source_id / f"{movie.id}.jpg"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}-{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(bytes(data))
+            os.replace(temporary, destination)
+            movie.poster_path = str(destination)
+            try:
+                metadata = json.loads(movie.metadata_json or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            metadata["poster_source"] = "embedded-container-artwork"
+            metadata["embedded_poster_mime"] = cover.get("mime")
+            movie.metadata_json = json.dumps(metadata, default=str)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _apply_technical(record: MediaFile, technical: dict[str, Any], error: str | None) -> None:

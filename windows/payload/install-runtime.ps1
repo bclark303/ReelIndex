@@ -83,7 +83,7 @@ try {
     $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ReelIndex'
     New-Item -Path $uninstallKey -Force | Out-Null
     Set-ItemProperty $uninstallKey DisplayName 'ReelIndex Movie Inventory'
-    Set-ItemProperty $uninstallKey DisplayVersion '1.3.6'
+    Set-ItemProperty $uninstallKey DisplayVersion '1.4.0'
     Set-ItemProperty $uninstallKey Publisher 'ReelIndex'
     Set-ItemProperty $uninstallKey InstallLocation $InstallDir
     Set-ItemProperty $uninstallKey DisplayIcon $launcher
