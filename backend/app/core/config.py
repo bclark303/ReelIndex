@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     max_probe_seconds: int = 45
     deep_probe_standard_seconds: int = 12
     deep_probe_retry_seconds: int = 30
+    deep_probe_recovery_attempts: int = 1
+    deep_probe_recovery_delay_seconds: float = 2.0
     deep_analysis_version: int = 2
     max_mediainfo_seconds: int = 8
     probe_workers: int = 4

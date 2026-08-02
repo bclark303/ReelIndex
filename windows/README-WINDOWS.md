@@ -137,3 +137,9 @@ Version 1.3.0 enumerates independent movie folders concurrently instead of waiti
 Version 1.3.0 separates deep analysis from ordinary inventory work. Deep scans create a persistent queue under the ReelIndex data directory, can be cancelled and resumed after a browser refresh or application restart, and support targeted scopes for incomplete/changed files, prior failures, missing fields, 4K/HDR candidates, or every active file.
 
 Deep analysis now bypasses MediaInfo on filesystem files and starts with a bounded minimal ffprobe query. A timeout is marked deferred and is not followed by a longer retry. An extended probe runs only when the standard probe succeeds but leaves core fields missing. Live output reports completed and remaining files, average processing time, and an estimated time remaining.
+## Version 1.3.1 deep-scan backpressure and recovery
+
+Version 1.3.1 submits only a bounded worker window instead of creating one future for every queued file. When a timeout circuit opens, untouched records remain in the persistent queue without being rewritten or logged one by one. Timed-out files also stay resumable.
+
+After a full worker batch times out, ReelIndex waits briefly and runs one serial recovery probe. A successful recovery continues the queue at reduced concurrency; a second timeout pauses the queue cleanly with a single summary event.
+

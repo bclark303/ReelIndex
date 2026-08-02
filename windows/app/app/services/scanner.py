@@ -93,10 +93,21 @@ class AnalyzerCircuitBreaker:
         with self._lock:
             return not self._disabled and self._timeouts + self._in_flight < self.threshold
 
+    @property
+    def disabled(self) -> bool:
+        with self._lock:
+            return self._disabled
+
     def record_success(self) -> None:
         with self._lock:
             self._in_flight = max(0, self._in_flight - 1)
             self._timeouts = 0
+
+    def reset(self) -> None:
+        with self._lock:
+            self._timeouts = 0
+            self._in_flight = 0
+            self._disabled = False
 
     def release_attempt(self) -> None:
         with self._lock:
@@ -593,31 +604,55 @@ class ScanManager:
                 queue_total=len(probe_jobs),
                 scope=scope,
             )
-        self._run_probe_jobs(
+        probe_result = self._run_probe_jobs(
             run_id, probe_jobs, cancel_event, mode, verbose=verbose, persistent_queue=(mode == "deep")
         )
         if mode == "deep" and not cancel_event.is_set():
-            deep_queue_store.remove(run_id)
+            queue_info = deep_queue_store.info(run_id)
+            if not queue_info["resumable"]:
+                deep_queue_store.remove(run_id)
+            elif probe_result.get("paused"):
+                scan_event_store.append(
+                    run_id,
+                    "warning",
+                    "deep-queue",
+                    f"Deep analysis paused after repeated timeouts · {queue_info['queue_remaining']:,} files remain resumable",
+                    queue_remaining=queue_info["queue_remaining"],
+                    queue_total=queue_info["queue_total"],
+                )
         self._raise_if_cancelled(cancel_event)
         self._fill_missing_runtimes(source_id, cancel_event)
         self._raise_if_cancelled(cancel_event)
         self._run_poster_jobs(run_id, poster_jobs, adapter, tmdb_token, cancel_event, verbose=verbose)
         self._raise_if_cancelled(cancel_event)
 
+        queue_info = deep_queue_store.info(run_id) if mode == "deep" else {"resumable": False, "queue_remaining": 0}
         with SessionLocal() as db:
             run = db.get(ScanRun, run_id)
             if not run:
                 return
             run.status = "completed"
-            run.current_item = None
+            run.current_item = (
+                f"Inventory complete · Deep analysis paused · {queue_info['queue_remaining']:,} files remaining"
+                if queue_info["resumable"]
+                else None
+            )
             run.completed_at = utcnow()
             db.commit()
+        elapsed_total = time.perf_counter() - scan_started
         scan_event_store.append(
             run_id,
-            "success",
+            "warning" if queue_info["resumable"] else "success",
             "complete",
-            f"Scan completed in {time.perf_counter() - scan_started:.2f}s",
-            elapsed_ms=round((time.perf_counter() - scan_started) * 1000),
+            (
+                f"Inventory completed in {elapsed_total:.2f}s; deep analysis paused with "
+                f"{queue_info['queue_remaining']:,} files remaining"
+                if queue_info["resumable"]
+                else f"Scan completed in {elapsed_total:.2f}s"
+            ),
+            elapsed_ms=round(elapsed_total * 1000),
+            queue_remaining=queue_info["queue_remaining"],
+            resumable=queue_info["resumable"],
         )
 
     def _execute_resume(
@@ -671,20 +706,47 @@ class ScanManager:
             queue_remaining=len(jobs),
             scope=manifest.get("scope") or "incomplete",
         )
-        self._run_probe_jobs(
+        probe_result = self._run_probe_jobs(
             run_id, jobs, cancel_event, "deep", verbose=runtime_settings.verbose_scan_logging(), persistent_queue=True
         )
         self._raise_if_cancelled(cancel_event)
-        deep_queue_store.remove(run_id)
+        queue_info = deep_queue_store.info(run_id)
+        if not queue_info["resumable"]:
+            deep_queue_store.remove(run_id)
+        elif probe_result.get("paused"):
+            scan_event_store.append(
+                run_id,
+                "warning",
+                "deep-queue",
+                f"Deep analysis paused after repeated timeouts · {queue_info['queue_remaining']:,} files remain resumable",
+                queue_remaining=queue_info["queue_remaining"],
+                queue_total=queue_info["queue_total"],
+            )
         self._fill_missing_runtimes(source_id, cancel_event)
+        queue_info = deep_queue_store.info(run_id)
         with SessionLocal() as db:
             run = db.get(ScanRun, run_id)
             if run:
                 run.status = "completed"
-                run.current_item = None
+                run.current_item = (
+                    f"Deep analysis paused · {queue_info['queue_remaining']:,} files remaining"
+                    if queue_info["resumable"]
+                    else None
+                )
                 run.completed_at = utcnow()
                 db.commit()
-        scan_event_store.append(run_id, "success", "complete", "Resumed deep-analysis queue completed")
+        scan_event_store.append(
+            run_id,
+            "warning" if queue_info["resumable"] else "success",
+            "complete",
+            (
+                f"Resumed deep analysis paused with {queue_info['queue_remaining']:,} files remaining"
+                if queue_info["resumable"]
+                else "Resumed deep-analysis queue completed"
+            ),
+            queue_remaining=queue_info["queue_remaining"],
+            resumable=queue_info["resumable"],
+        )
 
     def _run_probe_jobs(
         self,
@@ -694,16 +756,18 @@ class ScanManager:
         mode: str,
         verbose: bool = False,
         persistent_queue: bool = False,
-    ) -> None:
+    ) -> dict[str, Any]:
         if not jobs:
             scan_event_store.append(run_id, "info", "analyze", "No changed files require analysis")
-            return
+            return {"processed": 0, "remaining": 0, "paused": False}
+
+        from collections import deque
+
         stage_started = time.perf_counter()
         workers = max(1, min(settings.probe_workers, len(jobs)))
         logger.info("Running %s analysis for %d files with %d workers", mode, len(jobs), workers)
         mediainfo_circuit = AnalyzerCircuitBreaker("MediaInfo", threshold=workers)
         ffprobe_circuit = AnalyzerCircuitBreaker("ffprobe", threshold=workers)
-
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reelindex-probe")
         scan_event_store.append(
             run_id,
@@ -712,51 +776,84 @@ class ScanManager:
             f"Analyzing {len(jobs):,} changed files with {workers} workers",
             mode=mode,
         )
-        futures: dict[Future[tuple[dict[str, Any], str | None]], ProbeJob] = {
-            executor.submit(
-                self._analyze_file,
-                job.candidate,
-                cancel_event,
-                mode,
-                lambda level, stage, message, run_id=run_id: scan_event_store.append(
-                    run_id, level, stage, message
-                ),
-                verbose,
-                mediainfo_circuit,
-                ffprobe_circuit,
-            ): job
-            for job in jobs
-        }
-        submitted_at = {future: time.perf_counter() for future in futures}
-        pending = set(futures)
+
+        waiting = deque(jobs)
+        futures: dict[Future[tuple[dict[str, Any], str | None]], ProbeJob] = {}
+        submitted_at: dict[Future[tuple[dict[str, Any], str | None]], float] = {}
+        active_limit = workers
+        recovery_attempts = 0
+        canary_active = False
+        canary_outcome: str | None = None
+
+        def can_submit() -> bool:
+            if cancel_event.is_set():
+                return False
+            if mode == "deep" and not ffprobe_circuit.available():
+                return False
+            return True
+
+        def submit_available() -> None:
+            while waiting and len(futures) < active_limit and can_submit():
+                job = waiting.popleft()
+                future = executor.submit(
+                    self._analyze_file,
+                    job.candidate,
+                    cancel_event,
+                    mode,
+                    lambda level, stage, message, run_id=run_id: scan_event_store.append(
+                        run_id, level, stage, message
+                    ),
+                    verbose,
+                    mediainfo_circuit,
+                    ffprobe_circuit,
+                )
+                futures[future] = job
+                submitted_at[future] = time.perf_counter()
+
+        processed = 0
+        succeeded = 0
+        failed = 0
+        deferred = 0
+        paused = False
+        submit_available()
         try:
             with SessionLocal() as db:
                 run = db.get(ScanRun, run_id)
                 if not run:
-                    return
-                completed = 0
-                while pending:
+                    return {"processed": 0, "remaining": len(jobs), "paused": False}
+
+                while futures:
                     self._raise_if_cancelled(cancel_event)
-                    done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                    done, _ = wait(set(futures), timeout=0.1, return_when=FIRST_COMPLETED)
                     if not done:
                         continue
                     for future in done:
                         self._raise_if_cancelled(cancel_event)
-                        completed += 1
-                        job = futures[future]
-                        queued_elapsed = time.perf_counter() - submitted_at.get(future, time.perf_counter())
+                        job = futures.pop(future)
+                        queued_elapsed = time.perf_counter() - submitted_at.pop(future, time.perf_counter())
+                        processed += 1
                         try:
                             technical, error = future.result()
                         except (ProbeCancelled, MediaInfoCancelled) as exc:
                             raise ScanCancelled(str(exc)) from exc
                         except Exception as exc:  # Defensive: a single file must not abort the scan.
                             technical, error = {}, str(exc)
+
                         record = db.get(MediaFile, job.record_id)
                         if record:
                             self._apply_technical(record, technical, error)
+
                         if error:
                             run.error_count += 1
-                            outcome = "deferred" if "timed out" in error.lower() or "deferred" in error.lower() else "failed"
+                            outcome = (
+                                "deferred"
+                                if "timed out" in error.lower() or "deferred" in error.lower()
+                                else "failed"
+                            )
+                            if outcome == "deferred":
+                                deferred += 1
+                            else:
+                                failed += 1
                             scan_event_store.append(
                                 run_id,
                                 "warning" if outcome == "deferred" else "error",
@@ -766,6 +863,7 @@ class ScanManager:
                             )
                         else:
                             outcome = "succeeded"
+                            succeeded += 1
                             run.analyzed_count += 1
                             source = technical.get("analysis_source") or "analyzer"
                             scan_event_store.append(
@@ -774,10 +872,19 @@ class ScanManager:
                                 "analyze",
                                 f"Analyzed {job.filename} with {source}",
                             )
+
                         if persistent_queue:
-                            queue_state = deep_queue_store.mark_complete(run_id, job.record_id, outcome)
+                            queue_state = deep_queue_store.mark_complete(
+                                run_id,
+                                job.record_id,
+                                outcome,
+                                keep_pending=(outcome == "deferred"),
+                            )
                         else:
                             queue_state = None
+                        if canary_active:
+                            canary_outcome = outcome
+
                         if verbose:
                             scan_event_store.append(
                                 run_id,
@@ -786,52 +893,134 @@ class ScanManager:
                                 f"Analysis job finished in {queued_elapsed:.3f}s: {job.filename}",
                                 elapsed_ms=round(queued_elapsed * 1000),
                             )
+
                         elapsed_stage = max(time.perf_counter() - stage_started, 0.001)
-                        average_seconds = elapsed_stage / completed
-                        remaining = len(jobs) - completed
-                        eta_seconds = round(average_seconds * remaining)
-                        run.current_item = (
-                            f"Deep analysis · {completed:,}/{len(jobs):,} · "
-                            f"{remaining:,} remaining · ETA {self._format_eta(eta_seconds)} · {job.filename}"
-                            if mode == "deep"
-                            else f"Analyzing · {completed:,}/{len(jobs):,} · {job.filename}"
+                        average_seconds = elapsed_stage / processed
+                        queue_remaining = (
+                            len(queue_state.get("pending") or [])
+                            if queue_state
+                            else len(waiting) + len(futures)
                         )
-                        if mode == "deep" and (completed == 1 or completed % 10 == 0 or completed == len(jobs)):
+                        eta_seconds = round(average_seconds * queue_remaining)
+                        run.current_item = (
+                            f"Deep analysis · {processed:,} attempted · {queue_remaining:,} remaining · "
+                            f"ETA {self._format_eta(eta_seconds)} · {job.filename}"
+                            if mode == "deep"
+                            else f"Analyzing · {processed:,}/{len(jobs):,} · {job.filename}"
+                        )
+                        if mode == "deep" and (processed == 1 or processed % 10 == 0):
                             scan_event_store.append(
                                 run_id,
                                 "info",
                                 "deep-queue",
-                                f"Deep analysis progress: {completed:,}/{len(jobs):,} · {remaining:,} remaining · ETA {self._format_eta(eta_seconds)}",
-                                completed=completed,
-                                remaining=remaining,
+                                f"Deep analysis progress: {processed:,} attempted · {queue_remaining:,} remaining · ETA {self._format_eta(eta_seconds)}",
+                                completed=processed,
+                                remaining=queue_remaining,
                                 total=len(jobs),
                                 average_ms=round(average_seconds * 1000),
                                 eta_seconds=eta_seconds,
-                                queue_remaining=len(queue_state.get("pending") or []) if queue_state else remaining,
+                                queue_remaining=queue_remaining,
                             )
-                        if completed % settings.scan_commit_interval == 0:
+                        if processed % settings.scan_commit_interval == 0:
                             db.commit()
+
+                    # Submit replacements only while the analyzer circuit remains healthy.
+                    # This bounded window prevents thousands of no-op deferred futures
+                    # after a timeout circuit opens. A single serial canary distinguishes
+                    # a bad batch or sleeping disk from a source-wide failure.
+                    if canary_active and not futures:
+                        if canary_outcome == "succeeded":
+                            active_limit = max(1, workers // 2)
+                            ffprobe_circuit = AnalyzerCircuitBreaker("ffprobe", threshold=active_limit)
+                            canary_active = False
+                            canary_outcome = None
+                            scan_event_store.append(
+                                run_id,
+                                "success",
+                                "ffprobe",
+                                f"Serial recovery probe succeeded; continuing with {active_limit} workers",
+                                recovery_workers=active_limit,
+                            )
+                        else:
+                            canary_active = False
+
+                    if mode == "deep" and ffprobe_circuit.disabled and not futures:
+                        max_recoveries = max(0, settings.deep_probe_recovery_attempts)
+                        if waiting and recovery_attempts < max_recoveries:
+                            recovery_attempts += 1
+                            delay = max(0.0, float(settings.deep_probe_recovery_delay_seconds))
+                            scan_event_store.append(
+                                run_id,
+                                "warning",
+                                "ffprobe",
+                                f"Probe batch timed out; waiting {delay:.1f}s before one serial recovery probe",
+                                recovery_attempt=recovery_attempts,
+                                recovery_delay_seconds=delay,
+                            )
+                            if cancel_event.wait(delay):
+                                raise ScanCancelled("Scan cancelled during deep-probe recovery delay")
+                            active_limit = 1
+                            ffprobe_circuit = AnalyzerCircuitBreaker("ffprobe", threshold=1)
+                            canary_active = True
+                            canary_outcome = None
+                            submit_available()
+                            continue
+                        paused = bool(waiting) or bool(
+                            persistent_queue and deep_queue_store.info(run_id)["queue_remaining"]
+                        )
+                        break
+
+                    submit_available()
+
                 db.commit()
         finally:
             cancelled = cancel_event.is_set()
             if cancelled:
                 for future in futures:
                     future.cancel()
-            # Do not let a stuck network-backed subprocess keep the scan row in
-            # "cancelling". ffprobe workers observe cancel_event and clean up in
-            # the background, while the scan manager can finish immediately.
             executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
+
+        remaining = (
+            deep_queue_store.info(run_id)["queue_remaining"]
+            if persistent_queue
+            else len(waiting)
+        )
+        if mode == "deep" and persistent_queue and remaining:
+            paused = True
+        elapsed = time.perf_counter() - stage_started
         if not cancel_event.is_set():
-            elapsed = time.perf_counter() - stage_started
+            level = "warning" if paused else "success"
+            summary = (
+                f"Deep analysis paused in {elapsed:.2f}s: {succeeded:,} succeeded, "
+                f"{failed:,} failed, {deferred:,} timed out, {remaining:,} remain"
+                if paused
+                else f"Analysis stage complete in {elapsed:.2f}s ({processed:,} files attempted)"
+            )
             scan_event_store.append(
                 run_id,
-                "success",
+                level,
                 "analyze",
-                f"Analysis stage complete in {elapsed:.2f}s ({len(jobs):,} files)",
+                summary,
                 elapsed_ms=round(elapsed * 1000),
-                files_per_second=round(len(jobs) / elapsed, 2) if elapsed else None,
+                attempted=processed,
+                succeeded=succeeded,
+                failed=failed,
+                deferred=deferred,
+                remaining=remaining,
+                files_per_second=round(processed / elapsed, 2) if elapsed else None,
                 workers=workers,
+                final_worker_limit=active_limit,
+                recovery_attempts=recovery_attempts,
+                paused=paused,
             )
+        return {
+            "processed": processed,
+            "succeeded": succeeded,
+            "failed": failed,
+            "deferred": deferred,
+            "remaining": remaining,
+            "paused": paused,
+        }
 
     def _run_poster_jobs(
         self,

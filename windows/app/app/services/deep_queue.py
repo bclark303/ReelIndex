@@ -89,16 +89,28 @@ class DeepQueueStore:
             "scan_scope": payload.get("scope") or "incomplete",
         }
 
-    def mark_complete(self, run_id: str, record_id: str, outcome: str) -> dict[str, Any] | None:
+    def mark_complete(
+        self,
+        run_id: str,
+        record_id: str,
+        outcome: str,
+        *,
+        keep_pending: bool = False,
+    ) -> dict[str, Any] | None:
+        """Record an attempt and optionally keep the record resumable.
+
+        Timed-out deep probes remain in ``pending`` so a later Resume Deep run can
+        retry them. Successful and permanently failed records are removed.
+        """
         with self._lock:
             payload = self.load(run_id)
             if not payload:
                 return None
             pending = list(payload.get("pending") or [])
-            try:
-                pending.remove(record_id)
-            except ValueError:
+            if record_id not in pending:
                 return payload
+            if not keep_pending:
+                pending.remove(record_id)
             payload["pending"] = pending
             payload["completed"] = int(payload.get("completed") or 0) + 1
             if outcome not in {"succeeded", "failed", "deferred"}:
