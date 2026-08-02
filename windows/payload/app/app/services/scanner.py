@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import queue
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+import uuid
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,6 +111,46 @@ class ScanManager:
         if cancel_event.is_set():
             raise ScanCancelled("Scan cancelled by user")
 
+    @staticmethod
+    def _run_cancellable_call(
+        operation: Any,
+        cancel_event: threading.Event,
+        label: str,
+    ) -> Any:
+        """Run a blocking adapter operation without letting it trap the scan thread.
+
+        Windows network and SMB calls can remain blocked inside the operating system
+        even after the user requests cancellation. The adapter call therefore runs in
+        a daemon thread while the scan manager polls the cancellation event. The
+        abandoned adapter thread cannot update the database and exits at its next
+        progress callback or when the underlying network call returns.
+        """
+        result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def worker() -> None:
+            try:
+                result_queue.put((True, operation()))
+            except BaseException as exc:  # Propagate adapter failures to the scan thread.
+                result_queue.put((False, exc))
+
+        thread = threading.Thread(
+            target=worker,
+            name=f"reelindex-{label}",
+            daemon=True,
+        )
+        thread.start()
+
+        while True:
+            if cancel_event.wait(0.1):
+                raise ScanCancelled(f"Scan cancelled during {label}")
+            try:
+                ok, result = result_queue.get_nowait()
+            except queue.Empty:
+                continue
+            if ok:
+                return result
+            raise result
+
     def _run_scan(self, source_id: str, run_id: str) -> None:
         with self._lock:
             cancel_event = self._cancel_events.get(run_id)
@@ -172,7 +215,11 @@ class ScanManager:
                     progress_run.current_item = f"Discovering · {movie_count:,} movies / {file_count:,} files · {label}"
                     progress_db.commit()
 
-        candidates = adapter.scan(progress=discovery_progress)
+        candidates = self._run_cancellable_call(
+            lambda: adapter.scan(progress=discovery_progress),
+            cancel_event,
+            "discovery",
+        )
         self._raise_if_cancelled(cancel_event)
         total_files = sum(len(movie.files) for movie in candidates)
         tmdb_token = config.get("tmdb_token") or settings.tmdb_api_token
@@ -293,7 +340,7 @@ class ScanManager:
         self._raise_if_cancelled(cancel_event)
         self._run_probe_jobs(run_id, probe_jobs, cancel_event)
         self._raise_if_cancelled(cancel_event)
-        self._fill_missing_runtimes(source_id)
+        self._fill_missing_runtimes(source_id, cancel_event)
         self._raise_if_cancelled(cancel_event)
         self._run_poster_jobs(run_id, poster_jobs, adapter, tmdb_token, cancel_event)
         self._raise_if_cancelled(cancel_event)
@@ -319,39 +366,51 @@ class ScanManager:
         logger.info("Analyzing %d files with %d ffprobe workers", len(jobs), workers)
 
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reelindex-probe")
+        futures: dict[Future[tuple[dict[str, Any], str | None]], ProbeJob] = {
+            executor.submit(self._analyze_file, job.candidate, cancel_event): job for job in jobs
+        }
+        pending = set(futures)
         try:
-            futures: dict[Future[tuple[dict[str, Any], str | None]], ProbeJob] = {
-                executor.submit(self._analyze_file, job.candidate, cancel_event): job for job in jobs
-            }
             with SessionLocal() as db:
                 run = db.get(ScanRun, run_id)
                 if not run:
                     return
-                for completed, future in enumerate(as_completed(futures), start=1):
-                    if cancel_event.is_set():
-                        for pending in futures:
-                            pending.cancel()
-                        raise ScanCancelled("Scan cancelled during media analysis")
-                    job = futures[future]
-                    try:
-                        technical, error = future.result()
-                    except ProbeCancelled as exc:
-                        raise ScanCancelled(str(exc)) from exc
-                    except Exception as exc:  # Defensive: a single file must not abort the scan.
-                        technical, error = {}, str(exc)
-                    record = db.get(MediaFile, job.record_id)
-                    if record:
-                        self._apply_technical(record, technical, error)
-                    if error:
-                        run.error_count += 1
-                    else:
-                        run.analyzed_count += 1
-                    run.current_item = f"Analyzing · {completed:,}/{len(jobs):,} · {job.filename}"
-                    if completed % settings.scan_commit_interval == 0:
-                        db.commit()
+                completed = 0
+                while pending:
+                    self._raise_if_cancelled(cancel_event)
+                    done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                    if not done:
+                        continue
+                    for future in done:
+                        self._raise_if_cancelled(cancel_event)
+                        completed += 1
+                        job = futures[future]
+                        try:
+                            technical, error = future.result()
+                        except ProbeCancelled as exc:
+                            raise ScanCancelled(str(exc)) from exc
+                        except Exception as exc:  # Defensive: a single file must not abort the scan.
+                            technical, error = {}, str(exc)
+                        record = db.get(MediaFile, job.record_id)
+                        if record:
+                            self._apply_technical(record, technical, error)
+                        if error:
+                            run.error_count += 1
+                        else:
+                            run.analyzed_count += 1
+                        run.current_item = f"Analyzing · {completed:,}/{len(jobs):,} · {job.filename}"
+                        if completed % settings.scan_commit_interval == 0:
+                            db.commit()
                 db.commit()
         finally:
-            executor.shutdown(wait=True, cancel_futures=True)
+            cancelled = cancel_event.is_set()
+            if cancelled:
+                for future in futures:
+                    future.cancel()
+            # Do not let a stuck network-backed subprocess keep the scan row in
+            # "cancelling". ffprobe workers observe cancel_event and clean up in
+            # the background, while the scan manager can finish immediately.
+            executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
 
     def _run_poster_jobs(
         self,
@@ -367,51 +426,63 @@ class ScanManager:
         logger.info("Fetching %d posters with %d workers", len(jobs), workers)
 
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reelindex-poster")
+        futures: dict[Future[PosterResult], PosterJob] = {
+            executor.submit(
+                self._fetch_poster,
+                adapter,
+                job.candidate,
+                job.destination,
+                tmdb_token,
+                cancel_event,
+            ): job
+            for job in jobs
+        }
+        pending = set(futures)
         try:
-            futures: dict[Future[PosterResult], PosterJob] = {
-                executor.submit(
-                    self._fetch_poster,
-                    adapter,
-                    job.candidate,
-                    job.destination,
-                    tmdb_token,
-                    cancel_event,
-                ): job
-                for job in jobs
-            }
             with SessionLocal() as db:
                 run = db.get(ScanRun, run_id)
                 if not run:
                     return
-                for completed, future in enumerate(as_completed(futures), start=1):
-                    if cancel_event.is_set():
-                        for pending in futures:
-                            pending.cancel()
-                        raise ScanCancelled("Scan cancelled during poster enrichment")
-                    job = futures[future]
-                    try:
-                        result = future.result()
-                    except Exception:
-                        logger.exception("Poster enrichment failed for %s", job.title)
-                        result = PosterResult(False)
-                    movie = db.get(Movie, job.movie_id)
-                    if movie and result.found:
-                        movie.poster_path = str(job.destination)
-                        if not movie.overview and result.overview:
-                            movie.overview = result.overview
-                        if result.tmdb_id:
-                            try:
-                                metadata = json.loads(movie.metadata_json or "{}")
-                            except json.JSONDecodeError:
-                                metadata = {}
-                            metadata["tmdb_id"] = result.tmdb_id
-                            movie.metadata_json = json.dumps(metadata)
-                    run.current_item = f"Posters · {completed:,}/{len(jobs):,} · {job.title}"
-                    if completed % settings.scan_commit_interval == 0:
-                        db.commit()
+                completed = 0
+                while pending:
+                    self._raise_if_cancelled(cancel_event)
+                    done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                    if not done:
+                        continue
+                    for future in done:
+                        self._raise_if_cancelled(cancel_event)
+                        completed += 1
+                        job = futures[future]
+                        try:
+                            result = future.result()
+                        except Exception:
+                            logger.exception("Poster enrichment failed for %s", job.title)
+                            result = PosterResult(False)
+                        movie = db.get(Movie, job.movie_id)
+                        if movie and result.found:
+                            movie.poster_path = str(job.destination)
+                            if not movie.overview and result.overview:
+                                movie.overview = result.overview
+                            if result.tmdb_id:
+                                try:
+                                    metadata = json.loads(movie.metadata_json or "{}")
+                                except json.JSONDecodeError:
+                                    metadata = {}
+                                metadata["tmdb_id"] = result.tmdb_id
+                                movie.metadata_json = json.dumps(metadata)
+                        run.current_item = f"Posters · {completed:,}/{len(jobs):,} · {job.title}"
+                        if completed % settings.scan_commit_interval == 0:
+                            db.commit()
                 db.commit()
         finally:
-            executor.shutdown(wait=True, cancel_futures=True)
+            cancelled = cancel_event.is_set()
+            if cancelled:
+                for future in futures:
+                    future.cancel()
+            # Poster HTTP calls cannot be force-killed safely from another Python
+            # thread. Abandon them on cancellation instead of blocking the scan
+            # manager; each worker writes to a temporary file and will discard it.
+            executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
 
     @staticmethod
     def _fetch_poster(
@@ -423,28 +494,73 @@ class ScanManager:
     ) -> PosterResult:
         if cancel_event and cancel_event.is_set():
             return PosterResult(False)
-        local_poster = candidate.metadata.get("origin") == "filesystem" and bool(candidate.poster_ref)
-        if local_poster and adapter.fetch_poster(candidate, destination):
-            return PosterResult(True)
-        if cancel_event and cancel_event.is_set():
-            return PosterResult(False)
-        try:
-            if destination.exists() and destination.stat().st_size > 100:
-                return PosterResult(True)
-        except OSError:
-            pass
-        if adapter.fetch_poster(candidate, destination):
-            return PosterResult(True)
-        if cancel_event and cancel_event.is_set():
-            return PosterResult(False)
-        if tmdb_token:
-            tmdb = TmdbClient(tmdb_token)
-            result = tmdb.find_movie(candidate.title, candidate.year)
-            if result and tmdb.download_poster(result.get("poster_path"), destination):
-                return PosterResult(True, overview=result.get("overview"), tmdb_id=result.get("id"))
-        return PosterResult(False)
 
-    def _fill_missing_runtimes(self, source_id: str) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(
+            f".{destination.stem}-{uuid.uuid4().hex}.tmp{destination.suffix}"
+        )
+
+        def discard_temporary() -> None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        def commit_temporary() -> bool:
+            if cancel_event and cancel_event.is_set():
+                discard_temporary()
+                return False
+            try:
+                if not temporary.exists() or temporary.stat().st_size == 0:
+                    return False
+                os.replace(temporary, destination)
+                return True
+            except OSError:
+                return False
+
+        def fetch_with_adapter() -> bool:
+            discard_temporary()
+            if cancel_event and cancel_event.is_set():
+                return False
+            return bool(adapter.fetch_poster(candidate, temporary)) and commit_temporary()
+
+        try:
+            local_poster = candidate.metadata.get("origin") == "filesystem" and bool(candidate.poster_ref)
+            if local_poster:
+                if fetch_with_adapter():
+                    return PosterResult(True)
+                if cancel_event and cancel_event.is_set():
+                    return PosterResult(False)
+
+            try:
+                if destination.exists() and destination.stat().st_size > 100:
+                    return PosterResult(True)
+            except OSError:
+                pass
+
+            if fetch_with_adapter():
+                return PosterResult(True)
+            if cancel_event and cancel_event.is_set():
+                return PosterResult(False)
+
+            if tmdb_token:
+                tmdb = TmdbClient(tmdb_token)
+                result = tmdb.find_movie(candidate.title, candidate.year)
+                if cancel_event and cancel_event.is_set():
+                    return PosterResult(False)
+                if result:
+                    discard_temporary()
+                    if tmdb.download_poster(result.get("poster_path"), temporary) and commit_temporary():
+                        return PosterResult(True, overview=result.get("overview"), tmdb_id=result.get("id"))
+            return PosterResult(False)
+        finally:
+            discard_temporary()
+
+    def _fill_missing_runtimes(
+        self,
+        source_id: str,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         with SessionLocal() as db:
             movies = db.scalars(
                 select(Movie)
@@ -452,7 +568,9 @@ class ScanManager:
                 .where(Movie.source_id == source_id, Movie.active.is_(True))
             ).all()
             changed = False
-            for movie in movies:
+            for index, movie in enumerate(movies, start=1):
+                if cancel_event and index % 100 == 0:
+                    self._raise_if_cancelled(cancel_event)
                 if movie.runtime_seconds:
                     continue
                 durations = [item.duration_seconds for item in movie.files if item.active and item.duration_seconds]
