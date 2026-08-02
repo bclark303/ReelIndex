@@ -30,7 +30,12 @@ class Source(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
-    movies: Mapped[list[Movie]] = relationship(back_populates="source", cascade="all, delete-orphan")
+    # ``movies`` remains the legacy ownership relationship used by existing
+    # databases. Canonical library membership is tracked by ``movie_links`` so
+    # one Movie can be seen by several filesystem or media-server sources.
+    movies: Mapped[list[Movie]] = relationship(back_populates="source")
+    movie_links: Mapped[list[MovieSource]] = relationship(back_populates="source", cascade="all, delete-orphan")
+    file_links: Mapped[list[MediaFileSource]] = relationship(back_populates="source", cascade="all, delete-orphan")
     scan_runs: Mapped[list[ScanRun]] = relationship(back_populates="source", cascade="all, delete-orphan")
 
 
@@ -43,6 +48,8 @@ class Movie(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    # Retained as a legacy owner for backward compatibility. A Movie may have
+    # additional source memberships through MovieSource.
     source_id: Mapped[str] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), nullable=False)
     source_movie_id: Mapped[str] = mapped_column(String(250), nullable=False)
     title: Mapped[str] = mapped_column(String(300), nullable=False)
@@ -57,6 +64,7 @@ class Movie(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     source: Mapped[Source] = relationship(back_populates="movies")
+    source_links: Mapped[list[MovieSource]] = relationship(back_populates="movie", cascade="all, delete-orphan")
     files: Mapped[list[MediaFile]] = relationship(back_populates="movie", cascade="all, delete-orphan")
 
 
@@ -71,6 +79,8 @@ class MediaFile(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     movie_id: Mapped[str] = mapped_column(ForeignKey("movies.id", ondelete="CASCADE"), nullable=False)
+    # Retained as the legacy first-seen external ID. Per-source IDs and paths are
+    # tracked by MediaFileSource.
     source_file_id: Mapped[str] = mapped_column(String(300), nullable=False)
     path: Mapped[str] = mapped_column(Text, nullable=False)
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -95,6 +105,54 @@ class MediaFile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     movie: Mapped[Movie] = relationship(back_populates="files")
+    source_links: Mapped[list[MediaFileSource]] = relationship(back_populates="media_file", cascade="all, delete-orphan")
+
+
+class MovieSource(Base):
+    """One source's external movie record mapped to a canonical Movie."""
+
+    __tablename__ = "movie_sources"
+    __table_args__ = (
+        UniqueConstraint("source_id", "source_movie_id", name="uq_movie_source_link_external"),
+        Index("ix_movie_sources_active", "active"),
+        Index("ix_movie_sources_movie", "movie_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), nullable=False)
+    movie_id: Mapped[str] = mapped_column(ForeignKey("movies.id", ondelete="CASCADE"), nullable=False)
+    source_movie_id: Mapped[str] = mapped_column(String(250), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    source: Mapped[Source] = relationship(back_populates="movie_links")
+    movie: Mapped[Movie] = relationship(back_populates="source_links")
+
+
+class MediaFileSource(Base):
+    """One source's external file record mapped to a canonical MediaFile."""
+
+    __tablename__ = "media_file_sources"
+    __table_args__ = (
+        UniqueConstraint("source_id", "source_file_id", name="uq_file_source_link_external"),
+        Index("ix_media_file_sources_active", "active"),
+        Index("ix_media_file_sources_file", "media_file_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), nullable=False)
+    media_file_id: Mapped[str] = mapped_column(ForeignKey("media_files.id", ondelete="CASCADE"), nullable=False)
+    source_file_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    source: Mapped[Source] = relationship(back_populates="file_links")
+    media_file: Mapped[MediaFile] = relationship(back_populates="source_links")
 
 
 class ScanRun(Base):

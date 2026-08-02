@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import reveal_config
-from app.models import MediaFile, Movie, Source
+from app.models import MediaFile, Movie, MovieSource, Source
 from app.schemas.api import (
     DashboardStats, MediaFileOut, MovieDetail, MovieListItem, PaginatedMovies,
     PosterSearchResponse, PosterSearchResult, PosterSelection,
@@ -77,7 +77,15 @@ def list_movies(
         terms = [term.strip() for term in search.split() if term.strip()]
         conditions.extend(Movie.title.ilike(f"%{term}%") for term in terms)
     if source_id:
-        conditions.append(Movie.source_id == source_id)
+        conditions.append(
+            select(MovieSource.id)
+            .where(
+                MovieSource.movie_id == Movie.id,
+                MovieSource.source_id == source_id,
+                MovieSource.active.is_(True),
+            )
+            .exists()
+        )
     if missing_poster is True:
         conditions.append(Movie.poster_path.is_(None))
     if resolution or codec or container or probe_errors is True:
@@ -218,7 +226,7 @@ def _tmdb_for_movie(movie: Movie) -> TmdbClient:
 
 
 def _poster_destination(movie: Movie) -> Path:
-    return settings.data_dir / "posters" / movie.source_id / f"{movie.id}.jpg"
+    return settings.data_dir / "posters" / "library" / f"{movie.id}.jpg"
 
 
 def _write_manual_poster(movie: Movie, data: bytes, source: str, metadata_update: dict | None = None) -> None:

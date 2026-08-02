@@ -1,6 +1,6 @@
 FROM python:3.12-slim-bookworm
 
-ARG REELINDEX_VERSION=1.4.6
+ARG REELINDEX_VERSION=1.4.7
 LABEL org.opencontainers.image.title="ReelIndex" \
       org.opencontainers.image.description="Read-only movie inventory for Windows, Docker, and Unraid" \
       org.opencontainers.image.source="https://github.com/bclark303/ReelIndex" \
