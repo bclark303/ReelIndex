@@ -21,7 +21,11 @@ class Settings(BaseSettings):
     deep_probe_health_window: int = 12
     deep_probe_matroska_workers: int = 2
     deep_probe_transport_workers: int = 1
-    # Retained for compatibility with older environment files. v1.3.4 does not
+    deep_probe_stage_bytes: int = 2 * 1024 * 1024
+    deep_probe_retry_stage_bytes: int = 4 * 1024 * 1024
+    deep_probe_stage_seconds: int = 5
+    deep_probe_local_seconds: int = 3
+    # Retained for compatibility with older environment files. v1.3.5 does not
     # sleeps or launches explicit recovery canaries between timeout clusters.
     deep_probe_recovery_attempts: int = 3
     deep_probe_recovery_delay_seconds: float = 2.0

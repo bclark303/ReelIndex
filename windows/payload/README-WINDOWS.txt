@@ -156,3 +156,8 @@ Version 1.3.4 removes per-timeout recovery sleeps and serial canary probes. Time
 
 Version 1.3.4 separates Quick-scan history from actual Deep-probe attempts, so untouched files receive the intended four-second first-attempt timeout. Deep analysis now processes Matroska/WebM with a two-worker cap and a smaller header-read window, transport streams with one worker, and fast containers with the full global worker pool. Concurrency recovery uses a rolling health window rather than requiring a long uninterrupted success streak. Verbose logs include per-container checkpoints and a final checkpoint when the scan is cancelled.
 
+
+
+## Version 1.3.5 local Matroska header staging
+
+Version 1.3.5 stops running ffprobe directly against MKV/WebM files on network shares. ReelIndex copies a bounded 2 MB header window (4 MB on retries) to local application storage in a killable child process, probes the temporary local fragment, calculates overall bitrate from the original file size and embedded duration, and deletes the fragment immediately. This avoids repeated SMB seeks while remaining read-only against the movie library.

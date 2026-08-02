@@ -1765,11 +1765,28 @@ class ScanManager:
             if max(0, int(attempt_count or 0)) == 0
             else settings.deep_probe_standard_seconds
         )
-        event(
-            "info",
-            "ffprobe",
-            f"Standard deep probe ({standard_timeout}s): {file_candidate.filename}",
+        suffix = Path(file_candidate.filename).suffix.lower()
+        stage_matroska = suffix in {".mkv", ".webm"}
+        stage_bytes = (
+            settings.deep_probe_stage_bytes
+            if max(0, int(attempt_count or 0)) == 0
+            else settings.deep_probe_retry_stage_bytes
         )
+        if stage_matroska:
+            event(
+                "info",
+                "ffprobe",
+                (
+                    f"Local Matroska header probe ({stage_bytes // (1024 * 1024)} MB): "
+                    f"{file_candidate.filename}"
+                ),
+            )
+        else:
+            event(
+                "info",
+                "ffprobe",
+                f"Standard deep probe ({standard_timeout}s): {file_candidate.filename}",
+            )
         standard_started = time.perf_counter()
         try:
             standard, standard_error = probe_media(
@@ -1777,6 +1794,9 @@ class ScanManager:
                 cancel_event,
                 profile="standard",
                 timeout_override=standard_timeout,
+                stage_matroska=stage_matroska,
+                stage_bytes=stage_bytes,
+                source_size_bytes=file_candidate.size_bytes,
             )
         except BaseException:
             if ffprobe_circuit:
@@ -1785,6 +1805,17 @@ class ScanManager:
         if verbose:
             elapsed = time.perf_counter() - standard_started
             event("debug", "timing", f"ffprobe standard {elapsed:.3f}s: {file_candidate.filename}")
+            diagnostics = standard.get("probe_diagnostics") if standard else None
+            if diagnostics:
+                event(
+                    "debug",
+                    "timing",
+                    (
+                        f"Matroska staging {diagnostics.get('staging_seconds', 0):.3f}s + "
+                        f"local probe {diagnostics.get('local_probe_seconds', 0):.3f}s: "
+                        f"{file_candidate.filename}"
+                    ),
+                )
 
         if not standard:
             disabled = ffprobe_circuit.record_error(standard_error) if ffprobe_circuit else False
@@ -1825,7 +1856,12 @@ class ScanManager:
         extended_started = time.perf_counter()
         try:
             extended, extended_error = probe_media(
-                file_candidate.local_path, cancel_event, profile="extended"
+                file_candidate.local_path,
+                cancel_event,
+                profile="extended",
+                stage_matroska=stage_matroska,
+                stage_bytes=max(stage_bytes, settings.deep_probe_retry_stage_bytes),
+                source_size_bytes=file_candidate.size_bytes,
             )
         except BaseException:
             if ffprobe_circuit:

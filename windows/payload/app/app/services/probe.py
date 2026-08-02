@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -54,6 +56,66 @@ def _hidden_process_options() -> dict[str, Any]:
         "creationflags": subprocess.CREATE_NO_WINDOW,
         "startupinfo": startupinfo,
     }
+
+
+def _stage_header_copy(
+    source: Path,
+    byte_limit: int,
+    timeout: int,
+    cancel_event: threading.Event | None = None,
+) -> tuple[Path | None, int, float, str | None]:
+    """Copy a bounded, sequential header window to local storage.
+
+    The copy runs in a child Python process so a blocked SMB read can be killed
+    at the timeout instead of pinning a scanner worker indefinitely.
+    """
+    stage_dir = settings.data_dir / "probe-stage"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix="reelindex-header-", suffix=source.suffix.lower(), dir=stage_dir
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    script = (
+        "import sys\n"
+        "source, destination, remaining = sys.argv[1], sys.argv[2], int(sys.argv[3])\n"
+        "with open(source, 'rb', buffering=0) as src, open(destination, 'wb', buffering=0) as dst:\n"
+        "    while remaining > 0:\n"
+        "        block = src.read(min(262144, remaining))\n"
+        "        if not block: break\n"
+        "        dst.write(block)\n"
+        "        remaining -= len(block)\n"
+    )
+    started = time.perf_counter()
+    try:
+        result = _run_hidden(
+            [sys.executable, "-c", script, str(source), str(temporary), str(byte_limit)],
+            timeout,
+            cancel_event,
+        )
+    except subprocess.TimeoutExpired:
+        temporary.unlink(missing_ok=True)
+        return None, 0, time.perf_counter() - started, (
+            f"Matroska header staging timed out after {timeout} seconds"
+        )
+    except FileNotFoundError as exc:
+        temporary.unlink(missing_ok=True)
+        return None, 0, time.perf_counter() - started, str(exc)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    if result.returncode != 0:
+        temporary.unlink(missing_ok=True)
+        return None, 0, time.perf_counter() - started, (
+            result.stderr or "Matroska header staging failed"
+        ).strip()[:2000]
+    copied = temporary.stat().st_size if temporary.exists() else 0
+    if copied < 4096:
+        temporary.unlink(missing_ok=True)
+        return None, copied, time.perf_counter() - started, (
+            "Matroska header staging returned too little data"
+        )
+    return temporary, copied, time.perf_counter() - started, None
 
 
 class ProbeCancelled(RuntimeError):
@@ -195,10 +257,31 @@ def probe_media(
     *,
     profile: ProbeProfile = "standard",
     timeout_override: int | None = None,
+    stage_matroska: bool = False,
+    stage_bytes: int | None = None,
+    source_size_bytes: int | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     probe_size, analyze_duration, timeout = _probe_limits(path, profile)
     if timeout_override is not None:
         timeout = max(1, int(timeout_override))
+
+    staged_path: Path | None = None
+    input_path = path
+    stage_elapsed = 0.0
+    copied_bytes = 0
+    is_matroska = path.suffix.lower() in {".mkv", ".webm"}
+    if stage_matroska and is_matroska:
+        limit = max(65536, int(stage_bytes or settings.deep_probe_stage_bytes))
+        staged_path, copied_bytes, stage_elapsed, stage_error = _stage_header_copy(
+            path, limit, settings.deep_probe_stage_seconds, cancel_event
+        )
+        if stage_error or not staged_path:
+            return {}, stage_error or "Matroska header staging failed"
+        input_path = staged_path
+        timeout = min(timeout, max(1, int(settings.deep_probe_local_seconds)))
+        probe_size = f"{max(1, copied_bytes // (1024 * 1024))}M"
+        analyze_duration = "2M"
+
     command = [
         settings.ffprobe_path,
         "-hide_banner",
@@ -212,16 +295,21 @@ def probe_media(
         _show_entries(profile),
         "-of",
         "json",
-        str(path),
+        str(input_path),
     ]
     if profile == "extended":
         command[command.index("-show_entries"):command.index("-show_entries")] = ["-show_chapters"]
+    probe_started = time.perf_counter()
     try:
         result = _run_hidden(command, timeout, cancel_event)
     except FileNotFoundError:
         return {}, "ffprobe is not installed"
     except subprocess.TimeoutExpired:
         return {}, f"ffprobe {profile} timed out after {timeout} seconds"
+    finally:
+        if staged_path:
+            staged_path.unlink(missing_ok=True)
+    probe_elapsed = time.perf_counter() - probe_started
     if result.returncode != 0:
         return {}, (result.stderr or f"ffprobe {profile} failed").strip()[:2000]
     try:
@@ -230,6 +318,18 @@ def probe_media(
         return {}, f"Invalid ffprobe output: {exc}"
 
     normalized = normalize_ffprobe(raw, profile)
+    if staged_path:
+        duration = normalized.get("duration_seconds")
+        if source_size_bytes and duration:
+            normalized["video_bitrate"] = int((int(source_size_bytes) * 8) / float(duration))
+        normalized["probe_transport"] = "local-matroska-header"
+        normalized["probe_diagnostics"] = {
+            "staged_header_bytes": copied_bytes,
+            "staging_seconds": round(stage_elapsed, 3),
+            "local_probe_seconds": round(probe_elapsed, 3),
+        }
+        if isinstance(normalized.get("raw"), dict):
+            normalized["raw"]["reelindex_staging"] = normalized["probe_diagnostics"]
     if not any(
         normalized.get(key) not in (None, "")
         for key in ("container", "duration_seconds", "video_codec", "width", "height", "audio_codec")
