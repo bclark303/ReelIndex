@@ -121,6 +121,55 @@ def test_two_source_scans_share_one_movie_and_file(tmp_path, monkeypatch):
     engine.dispose()
 
 
+
+def test_filename_and_size_alone_do_not_merge_different_movies(tmp_path):
+    engine, LocalSession = make_session(tmp_path)
+    with LocalSession() as db:
+        first_source = Source(name="One", type="filesystem", url_or_path="/one")
+        second_source = Source(name="Two", type="plex", url_or_path="http://plex")
+        db.add_all([first_source, second_source])
+        db.flush()
+        first = Movie(
+            source_id=first_source.id,
+            source_movie_id="one",
+            title="Alpha",
+            sort_title="alpha",
+            year=2001,
+        )
+        second = Movie(
+            source_id=second_source.id,
+            source_movie_id="two",
+            title="Beta",
+            sort_title="beta",
+            year=2002,
+        )
+        db.add_all([first, second])
+        db.flush()
+        db.add_all([
+            MediaFile(
+                movie_id=first.id,
+                source_file_id="one-file",
+                path="/one/shared-name.mkv",
+                filename="shared-name.mkv",
+                size_bytes=123456789,
+            ),
+            MediaFile(
+                movie_id=second.id,
+                source_file_id="two-file",
+                path="/two/shared-name.mkv",
+                filename="shared-name.mkv",
+                size_bytes=123456789,
+            ),
+        ])
+        db.commit()
+
+        merged = upgrade_library_identity(db)
+        assert merged == 0
+        assert db.scalar(select(func.count(Movie.id))) == 2
+        assert db.scalar(select(func.count(MediaFile.id))) == 2
+
+    engine.dispose()
+
 def test_startup_consolidates_existing_cross_source_duplicates(tmp_path):
     engine, LocalSession = make_session(tmp_path)
     with LocalSession() as db:

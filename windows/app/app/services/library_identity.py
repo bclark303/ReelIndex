@@ -108,6 +108,11 @@ def file_identity_keys(candidate_or_file: Any) -> set[str]:
     return keys
 
 
+def strong_file_identity_keys(candidate_or_file: Any) -> set[str]:
+    """Physical-path keys safe enough to establish movie identity."""
+    return {key for key in file_identity_keys(candidate_or_file) if key.startswith("path:")}
+
+
 def candidate_fingerprint(candidate: Any) -> str:
     """Fingerprint content independently of the adapter's external IDs."""
     paths, filename, size, modified = _file_values(candidate)
@@ -195,7 +200,7 @@ class LibraryIdentityIndex:
             if movie is not None:
                 return movie, None
         for file_candidate in getattr(candidate, "files", []) or []:
-            for key in file_identity_keys(file_candidate):
+            for key in strong_file_identity_keys(file_candidate):
                 media_file = self.file_keys.get(key)
                 if media_file is not None:
                     return media_file.movie, None
@@ -437,7 +442,7 @@ def consolidate_existing_duplicates(db: Session) -> int:
         metadata = _json_object(movie.metadata_json)
         keys = {key for key in movie_identity_keys(movie.title, movie.year, movie.runtime_seconds, metadata) if key.startswith(("imdb:", "tmdb:"))}
         for media_file in movie.files:
-            keys.update(file_identity_keys(media_file))
+            keys.update(strong_file_identity_keys(media_file))
         owners = [identity_owner[key] for key in keys if key in identity_owner and identity_owner[key] in db]
         canonical = owners[0] if owners else movie
         if canonical.id != movie.id and not (_source_ids(canonical) & _source_ids(movie)):

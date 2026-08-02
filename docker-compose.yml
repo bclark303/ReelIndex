@@ -1,6 +1,6 @@
 services:
   reelindex:
-    image: ghcr.io/bclark303/reelindex:1.4.6
+    image: ghcr.io/bclark303/reelindex:1.4.7
     build:
       context: .
       dockerfile: Dockerfile
