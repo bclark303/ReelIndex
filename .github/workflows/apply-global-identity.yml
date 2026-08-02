@@ -22,6 +22,8 @@ jobs:
           else
             python scripts/apply_global_identity_patch.py
           fi
+      - name: Patch canonical identity edge cases
+        run: python scripts/patch_global_identity_edges.py
       - name: Synchronize Windows payload
         run: python scripts/sync-packages.py
       - name: Compile Python sources
@@ -35,5 +37,5 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add backend/app windows/app/app windows/app/web windows/web
-          git commit -m 'Apply canonical scan identity indexing'
+          git commit -m 'Apply canonical library identity edge fixes'
           git push origin HEAD:agent/global-library-identity
