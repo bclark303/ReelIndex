@@ -1,0 +1,39 @@
+.poster-badges {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: auto;
+  bottom: auto;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  align-content: flex-start;
+  justify-content: flex-start;
+  gap: 6px;
+  width: max-content;
+  max-width: calc(100% - 20px);
+  height: auto;
+  min-height: 0;
+  pointer-events: none;
+}
+
+.poster-badges .badge {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  width: auto;
+  min-width: 0;
+  height: auto;
+  min-height: 0;
+  padding: 5px 8px;
+  border-radius: 999px;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.42);
+}
+
+.poster-badges .badge-solid {
+  color: #1c1608;
+  background: linear-gradient(180deg, var(--accent-2), var(--accent));
+  border-color: rgba(255, 232, 166, 0.78);
+}
