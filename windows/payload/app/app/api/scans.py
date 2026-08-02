@@ -38,7 +38,7 @@ def _out(run: ScanRun, source_name: str | None = None) -> ScanRunOut:
 @router.post("/{source_id}", response_model=ScanRunOut, status_code=status.HTTP_202_ACCEPTED)
 def start_scan(
     source_id: str,
-    mode: Literal["quick", "deep"] = "quick",
+    mode: Literal["quick", "deep", "posters"] = "quick",
     scope: Literal["incomplete", "failed", "missing", "4k", "all"] = "incomplete",
     db: Session = Depends(get_db),
 ):

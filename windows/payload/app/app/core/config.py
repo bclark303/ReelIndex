@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     deep_probe_retry_stage_bytes: int = 4 * 1024 * 1024
     deep_probe_stage_seconds: int = 5
     deep_probe_local_seconds: int = 2
-    # Retained for compatibility with older environment files. v1.4.0 does not
+    # Retained for compatibility with older environment files. v1.4.1 does not
     # sleeps or launches explicit recovery canaries between timeout clusters.
     deep_probe_recovery_attempts: int = 3
     deep_probe_recovery_delay_seconds: float = 2.0

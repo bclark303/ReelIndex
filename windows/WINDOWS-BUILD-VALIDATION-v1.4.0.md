@@ -1,8 +1,8 @@
-# ReelIndex Windows v1.4.0 Validation
+# ReelIndex Windows v1.4.1 Validation
 
 ## Release scope
 
-Version 1.4.0 combines the previously proposed 1.4.0, 1.4.1, and 1.4.2 work into one unified native-container release.
+Version 1.4.1 combines the previously proposed 1.4.1, 1.4.1, and 1.4.2 work into one unified native-container release.
 
 Native-first deep analysis now covers:
 
@@ -71,9 +71,9 @@ No file in this integration set invoked `ffprobe`. Most elapsed time was process
 - Python compilation passed.
 - JavaScript syntax check passed.
 - FastAPI startup and application lifespan completed.
-- `/api/health` returned ReelIndex `1.4.0`.
+- `/api/health` returned ReelIndex `1.4.1`.
 - `/api/diagnostics` listed all six native parser families and analysis version 3.
-- Static HTML returned cache-busted v1.4.0 assets.
+- Static HTML returned cache-busted v1.4.1 assets.
 - Patch ZIP integrity passed.
 - Installer payload ZIP integrity passed.
 - Required payload files were present.

@@ -138,11 +138,11 @@ class ScanManager:
     DEEP_SCOPES = {"incomplete", "failed", "missing", "4k", "all"}
 
     def start(self, source_id: str, mode: str = "quick", scope: str = "incomplete") -> str:
-        if mode not in {"quick", "deep"}:
-            raise ValueError("Scan mode must be quick or deep")
+        if mode not in {"quick", "deep", "posters"}:
+            raise ValueError("Scan mode must be quick, deep, or posters")
         if scope not in self.DEEP_SCOPES:
             raise ValueError("Unsupported deep-scan scope")
-        if mode == "quick":
+        if mode in {"quick", "posters"}:
             scope = "incomplete"
         with self._lock:
             if source_id in self._active:
@@ -526,7 +526,11 @@ class ScanManager:
                     file_record.edition = file_candidate.edition
                     file_record.active = True
 
-                    if self._has_server_technical(file_candidate.technical):
+                    if mode == "posters":
+                        # Poster-only refresh must never reopen or reanalyze media files.
+                        # Existing technical metadata remains untouched.
+                        run.cached_count += 1
+                    elif self._has_server_technical(file_candidate.technical):
                         # Plex/Jellyfin/Emby already provide the fields needed by the
                         # competition. Do not reopen every media file over the network.
                         server_technical = dict(file_candidate.technical)
@@ -602,6 +606,8 @@ class ScanManager:
             cached_files=total_files - len(probe_jobs),
         )
 
+        # Create the persistent Deep queue before artwork work. A cancellation
+        # during poster resolution must not lose the technical-analysis queue.
         self._raise_if_cancelled(cancel_event)
         if mode == "deep" and probe_jobs:
             deep_queue_store.create(
@@ -619,6 +625,13 @@ class ScanManager:
                 queue_total=len(probe_jobs),
                 scope=scope,
             )
+
+        # Posters are intentionally resolved immediately after indexing. They are
+        # independent of technical analysis, so a long or resumable Deep Scan can no
+        # longer prevent artwork from appearing in the library.
+        self._run_poster_jobs(run_id, poster_jobs, adapter, tmdb_token, cancel_event, verbose=verbose)
+        self._raise_if_cancelled(cancel_event)
+
         probe_result = self._run_probe_jobs(
             run_id, probe_jobs, cancel_event, mode, verbose=verbose, persistent_queue=(mode == "deep")
         )
@@ -636,9 +649,8 @@ class ScanManager:
                     queue_total=queue_info["queue_total"],
                 )
         self._raise_if_cancelled(cancel_event)
-        self._fill_missing_runtimes(source_id, cancel_event)
-        self._raise_if_cancelled(cancel_event)
-        self._run_poster_jobs(run_id, poster_jobs, adapter, tmdb_token, cancel_event, verbose=verbose)
+        if mode != "posters":
+            self._fill_missing_runtimes(source_id, cancel_event)
         self._raise_if_cancelled(cancel_event)
 
         queue_info = deep_queue_store.info(run_id) if mode == "deep" else {"resumable": False, "queue_remaining": 0}
@@ -1920,6 +1932,15 @@ class ScanManager:
         movie = db.get(Movie, record.movie_id)
         if not movie:
             return
+        # Sidecar, media-server, and TMDB artwork selected during the early poster
+        # stage is authoritative. Embedded cover art is only a missing-poster fallback.
+        if movie.poster_path:
+            try:
+                existing = Path(movie.poster_path)
+                if existing.exists() and existing.stat().st_size > 100:
+                    return
+            except OSError:
+                pass
         destination = settings.data_dir / "posters" / movie.source_id / f"{movie.id}.jpg"
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(f".{destination.name}-{uuid.uuid4().hex}.tmp")
