@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     data_dir: Path = Path("/data")
     database_url: str | None = None
+    sqlite_journal_mode: str = "DELETE"
     cors_origins: str = "http://localhost:5173,http://localhost:8080"
     demo_mode: bool = False
     log_level: str = "INFO"
