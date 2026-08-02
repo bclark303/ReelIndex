@@ -48,6 +48,7 @@ class ProbeJob:
     record_id: str
     filename: str
     candidate: Any
+    attempt_count: int = 0
 
 
 @dataclass(slots=True)
@@ -544,7 +545,17 @@ class ScanManager:
                     elif mode == "deep" and self._should_queue_deep(
                         file_record, file_candidate, scope, same_fingerprint
                     ):
-                        probe_jobs.append(ProbeJob(file_record.id, file_candidate.filename, file_candidate))
+                        attempt_count = int(
+                            self._analysis_marker(file_record.probe_json).get("attempt_count") or 0
+                        )
+                        probe_jobs.append(
+                            ProbeJob(
+                                file_record.id,
+                                file_candidate.filename,
+                                file_candidate,
+                                attempt_count=attempt_count,
+                            )
+                        )
                     elif mode == "quick" and not cached_valid:
                         probe_jobs.append(ProbeJob(file_record.id, file_candidate.filename, file_candidate))
                     else:
@@ -710,7 +721,16 @@ class ScanManager:
                     edition=record.edition,
                     technical={},
                 )
-                jobs.append(ProbeJob(record.id, record.filename, candidate))
+                jobs.append(
+                    ProbeJob(
+                        record.id,
+                        record.filename,
+                        candidate,
+                        attempt_count=int(
+                            self._analysis_marker(record.probe_json).get("attempt_count") or 0
+                        ),
+                    )
+                )
             deep_queue_store.keep_only(run_id, [job.record_id for job in jobs])
             run.status = "running"
             run.current_item = f"Resuming deep analysis · 0/{len(jobs):,}"
@@ -796,7 +816,10 @@ class ScanManager:
         workers = max(1, min(settings.probe_workers, len(jobs)))
         logger.info("Running %s analysis for %d files with %d workers", mode, len(jobs), workers)
         mediainfo_circuit = AnalyzerCircuitBreaker("MediaInfo", threshold=workers)
-        ffprobe_circuit = AnalyzerCircuitBreaker("ffprobe", threshold=workers)
+        # Deep scans use scheduler-level health tracking instead of a per-attempt
+        # circuit. A slow file is deferred and rotated behind untouched work; it
+        # must not stop thousands of healthy files on the same SMB source.
+        ffprobe_circuit = None if mode == "deep" else AnalyzerCircuitBreaker("ffprobe", threshold=workers)
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reelindex-probe")
         scan_event_store.append(
             run_id,
@@ -806,22 +829,60 @@ class ScanManager:
             mode=mode,
         )
 
-        waiting = deque(jobs)
+        def container_priority(job: ProbeJob) -> tuple[int, int]:
+            suffix = Path(job.filename).suffix.lower()
+            if suffix in {".mp4", ".m4v", ".mov", ".avi"}:
+                rank = 0
+            elif suffix in {".mkv", ".webm"}:
+                rank = 1
+            elif suffix in {".ts", ".m2ts", ".mts", ".mpg", ".mpeg"}:
+                rank = 2
+            else:
+                rank = 1
+            return (max(0, int(job.attempt_count or 0)), rank)
+
+        ordered_jobs = sorted(jobs, key=container_priority) if mode == "deep" else list(jobs)
+        if mode == "deep" and persistent_queue:
+            deep_queue_store.keep_only(run_id, [job.record_id for job in ordered_jobs])
+            fast_count = sum(
+                Path(job.filename).suffix.lower() in {".mp4", ".m4v", ".mov", ".avi"}
+                for job in ordered_jobs
+            )
+            matroska_count = sum(
+                Path(job.filename).suffix.lower() in {".mkv", ".webm"}
+                for job in ordered_jobs
+            )
+            transport_count = sum(
+                Path(job.filename).suffix.lower() in {".ts", ".m2ts", ".mts", ".mpg", ".mpeg"}
+                for job in ordered_jobs
+            )
+            scan_event_store.append(
+                run_id,
+                "info",
+                "deep-queue",
+                (
+                    f"Prioritized deep queue: {fast_count:,} fast containers, "
+                    f"{matroska_count:,} Matroska/WebM, {transport_count:,} transport streams"
+                ),
+                fast_containers=fast_count,
+                matroska_containers=matroska_count,
+                transport_containers=transport_count,
+            )
+
+        waiting = deque(ordered_jobs)
         futures: dict[Future[tuple[dict[str, Any], str | None]], ProbeJob] = {}
         submitted_at: dict[Future[tuple[dict[str, Any], str | None]], float] = {}
         active_limit = workers
-        recovery_attempts = 0
-        recovery_chain = 0
-        recovery_target_limit = max(1, workers // 2)
-        canary_active = False
-        canary_outcome: str | None = None
+        healthy_streak = 0
+        consecutive_timeouts = 0
+        worker_reductions = 0
+        worker_increases = 0
+        pause_requested = False
+        pause_after_timeouts = max(2, int(settings.deep_probe_pause_after_timeouts))
+        ramp_after_successes = max(2, int(settings.deep_probe_ramp_successes))
 
         def can_submit() -> bool:
-            if cancel_event.is_set():
-                return False
-            if mode == "deep" and not ffprobe_circuit.available():
-                return False
-            return True
+            return not cancel_event.is_set() and not pause_requested
 
         def submit_available() -> None:
             while waiting and len(futures) < active_limit and can_submit():
@@ -837,6 +898,7 @@ class ScanManager:
                     verbose,
                     mediainfo_circuit,
                     ffprobe_circuit,
+                    job.attempt_count,
                 )
                 futures[future] = job
                 submitted_at[future] = time.perf_counter()
@@ -858,6 +920,9 @@ class ScanManager:
                     done, _ = wait(set(futures), timeout=0.1, return_when=FIRST_COMPLETED)
                     if not done:
                         continue
+
+                    batch_timeouts = 0
+                    batch_responsive = 0
                     for future in done:
                         self._raise_if_cancelled(cancel_event)
                         job = futures.pop(future)
@@ -883,8 +948,10 @@ class ScanManager:
                             )
                             if outcome == "deferred":
                                 deferred += 1
+                                batch_timeouts += 1
                             else:
                                 failed += 1
+                                batch_responsive += 1
                             scan_event_store.append(
                                 run_id,
                                 "warning" if outcome == "deferred" else "error",
@@ -895,6 +962,7 @@ class ScanManager:
                         else:
                             outcome = "succeeded"
                             succeeded += 1
+                            batch_responsive += 1
                             run.analyzed_count += 1
                             source = technical.get("analysis_source") or "analyzer"
                             scan_event_store.append(
@@ -913,8 +981,6 @@ class ScanManager:
                             )
                         else:
                             queue_state = None
-                        if canary_active:
-                            canary_outcome = outcome
 
                         if verbose:
                             scan_event_store.append(
@@ -944,76 +1010,109 @@ class ScanManager:
                                 run_id,
                                 "info",
                                 "deep-queue",
-                                f"Deep analysis progress: {processed:,} attempted · {queue_remaining:,} remaining · ETA {self._format_eta(eta_seconds)}",
+                                (
+                                    f"Deep analysis progress: {processed:,} attempted · "
+                                    f"{queue_remaining:,} remaining · ETA {self._format_eta(eta_seconds)}"
+                                ),
                                 completed=processed,
                                 remaining=queue_remaining,
                                 total=len(jobs),
                                 average_ms=round(average_seconds * 1000),
                                 eta_seconds=eta_seconds,
                                 queue_remaining=queue_remaining,
+                                active_workers=active_limit,
                             )
                         if processed % settings.scan_commit_interval == 0:
                             db.commit()
 
-                    # Submit replacements only while the analyzer circuit remains healthy.
-                    # A timeout batch reduces concurrency and enters a bounded serial
-                    # recovery chain. One responsive canary (success or a fast ordinary
-                    # failure) proves the share is reachable and lets the queue continue;
-                    # only repeated serial timeouts pause untouched work.
-                    if canary_active and not futures:
-                        canary_active = False
-                        if canary_outcome != "deferred":
-                            active_limit = recovery_target_limit
-                            ffprobe_circuit = AnalyzerCircuitBreaker("ffprobe", threshold=active_limit)
-                            recovery_chain = 0
-                            level = "success" if canary_outcome == "succeeded" else "warning"
-                            label = "succeeded" if canary_outcome == "succeeded" else "responded without timing out"
-                            scan_event_store.append(
-                                run_id,
-                                level,
-                                "ffprobe",
-                                f"Serial recovery probe {label}; continuing with {active_limit} worker{'s' if active_limit != 1 else ''}",
-                                recovery_workers=active_limit,
-                                recovery_outcome=canary_outcome,
-                            )
-                            canary_outcome = None
-                        else:
-                            canary_outcome = None
+                    if mode == "deep":
+                        if batch_responsive:
+                            consecutive_timeouts = 0
+                            healthy_streak += batch_responsive
+                        elif batch_timeouts:
+                            consecutive_timeouts += batch_timeouts
+                            healthy_streak = 0
 
-                    if mode == "deep" and ffprobe_circuit.disabled and not futures:
-                        max_recoveries = max(1, settings.deep_probe_recovery_attempts)
-                        if waiting and recovery_chain < max_recoveries:
-                            if recovery_chain == 0:
-                                recovery_target_limit = max(1, active_limit // 2)
-                            recovery_chain += 1
-                            recovery_attempts += 1
-                            delay = max(0.0, float(settings.deep_probe_recovery_delay_seconds))
+                        # A complete timeout cluster lowers pressure immediately, but
+                        # never sleeps or launches an extra canary. Timed-out records
+                        # are already rotated behind untouched queue entries.
+                        if (
+                            batch_timeouts
+                            and not batch_responsive
+                            and active_limit > 1
+                            and consecutive_timeouts >= active_limit
+                        ):
+                            previous_limit = active_limit
+                            active_limit = max(1, active_limit // 2)
+                            consecutive_timeouts = 0
+                            healthy_streak = 0
+                            worker_reductions += 1
                             scan_event_store.append(
                                 run_id,
                                 "warning",
                                 "ffprobe",
                                 (
-                                    f"Probe timeout circuit open; waiting {delay:.1f}s before serial "
-                                    f"recovery probe {recovery_chain}/{max_recoveries}"
+                                    f"Timeout cluster detected; reducing deep-scan concurrency "
+                                    f"from {previous_limit} to {active_limit} workers without pausing"
                                 ),
-                                recovery_attempt=recovery_chain,
-                                recovery_attempt_total=recovery_attempts,
-                                recovery_limit=max_recoveries,
-                                recovery_delay_seconds=delay,
-                                recovery_target_workers=recovery_target_limit,
+                                previous_workers=previous_limit,
+                                active_workers=active_limit,
+                                worker_reductions=worker_reductions,
                             )
-                            if cancel_event.wait(delay):
-                                raise ScanCancelled("Scan cancelled during deep-probe recovery delay")
-                            active_limit = 1
-                            ffprobe_circuit = AnalyzerCircuitBreaker("ffprobe", threshold=1)
-                            canary_active = True
-                            canary_outcome = None
-                            submit_available()
+
+                        # Once the source has been responsive for a sustained run,
+                        # cautiously restore parallelism. This prevents one early cold-
+                        # disk cluster from forcing the remaining library to run serially.
+                        if active_limit < workers and healthy_streak >= ramp_after_successes:
+                            previous_limit = active_limit
+                            active_limit = min(workers, active_limit * 2)
+                            healthy_streak = 0
+                            worker_increases += 1
+                            scan_event_store.append(
+                                run_id,
+                                "success",
+                                "ffprobe",
+                                (
+                                    f"Source remained responsive; increasing deep-scan concurrency "
+                                    f"from {previous_limit} to {active_limit} workers"
+                                ),
+                                previous_workers=previous_limit,
+                                active_workers=active_limit,
+                                worker_increases=worker_increases,
+                            )
+
+                        # At serial concurrency, isolated file timeouts are ordinary
+                        # per-file failures. Pause only when several different files time
+                        # out consecutively, which is strong evidence that the share is
+                        # unavailable rather than that one container is slow.
+                        if active_limit == 1 and consecutive_timeouts >= pause_after_timeouts:
+                            pause_requested = True
+                            scan_event_store.append(
+                                run_id,
+                                "warning",
+                                "ffprobe",
+                                (
+                                    f"Pausing deep analysis after {consecutive_timeouts} consecutive "
+                                    f"serial timeouts; untouched files remain resumable"
+                                ),
+                                consecutive_timeouts=consecutive_timeouts,
+                                pause_threshold=pause_after_timeouts,
+                            )
+
+                        # When one member of an active batch times out, wait for the
+                        # rest of that batch to settle before filling the open slot.
+                        # This prevents four cold-disk timeouts from spawning several
+                        # replacement probes before the scheduler can lower pressure.
+                        if batch_timeouts and not batch_responsive and futures:
                             continue
-                        paused = bool(waiting) or bool(
-                            persistent_queue and deep_queue_store.info(run_id)["queue_remaining"]
-                        )
-                        break
+
+                    if pause_requested:
+                        if not futures:
+                            paused = bool(waiting) or bool(
+                                persistent_queue and deep_queue_store.info(run_id)["queue_remaining"]
+                            )
+                            break
+                        continue
 
                     submit_available()
 
@@ -1055,7 +1154,8 @@ class ScanManager:
                 files_per_second=round(processed / elapsed, 2) if elapsed else None,
                 workers=workers,
                 final_worker_limit=active_limit,
-                recovery_attempts=recovery_attempts,
+                worker_reductions=worker_reductions,
+                worker_increases=worker_increases,
                 paused=paused,
             )
         return {
@@ -1065,6 +1165,9 @@ class ScanManager:
             "deferred": deferred,
             "remaining": remaining,
             "paused": paused,
+            "final_worker_limit": active_limit,
+            "worker_reductions": worker_reductions,
+            "worker_increases": worker_increases,
         }
 
     def _run_poster_jobs(
@@ -1450,6 +1553,7 @@ class ScanManager:
         verbose: bool = False,
         mediainfo_circuit: AnalyzerCircuitBreaker | None = None,
         ffprobe_circuit: AnalyzerCircuitBreaker | None = None,
+        attempt_count: int = 0,
     ) -> tuple[dict[str, Any], str | None]:
         def event(level: str, stage: str, message: str) -> None:
             if event_callback:
@@ -1532,11 +1636,23 @@ class ScanManager:
             })
             return finish(technical, error)
 
-        event("info", "ffprobe", f"Standard deep probe: {file_candidate.filename}")
+        standard_timeout = (
+            settings.deep_probe_initial_seconds
+            if max(0, int(attempt_count or 0)) == 0
+            else settings.deep_probe_standard_seconds
+        )
+        event(
+            "info",
+            "ffprobe",
+            f"Standard deep probe ({standard_timeout}s): {file_candidate.filename}",
+        )
         standard_started = time.perf_counter()
         try:
             standard, standard_error = probe_media(
-                file_candidate.local_path, cancel_event, profile="standard"
+                file_candidate.local_path,
+                cancel_event,
+                profile="standard",
+                timeout_override=standard_timeout,
             )
         except BaseException:
             if ffprobe_circuit:

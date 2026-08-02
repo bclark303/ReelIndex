@@ -177,8 +177,11 @@ def probe_media(
     cancel_event: threading.Event | None = None,
     *,
     profile: ProbeProfile = "standard",
+    timeout_override: int | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     probe_size, analyze_duration, timeout = _probe_limits(path, profile)
+    if timeout_override is not None:
+        timeout = max(1, int(timeout_override))
     command = [
         settings.ffprobe_path,
         "-hide_banner",

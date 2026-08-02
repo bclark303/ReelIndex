@@ -13,8 +13,13 @@ class Settings(BaseSettings):
     tmdb_api_token: str | None = None
     poster_width: int = 500
     max_probe_seconds: int = 45
+    deep_probe_initial_seconds: int = 4
     deep_probe_standard_seconds: int = 8
     deep_probe_retry_seconds: int = 20
+    deep_probe_pause_after_timeouts: int = 6
+    deep_probe_ramp_successes: int = 12
+    # Retained for compatibility with older environment files. v1.3.3 no longer
+    # sleeps or launches explicit recovery canaries between timeout clusters.
     deep_probe_recovery_attempts: int = 3
     deep_probe_recovery_delay_seconds: float = 2.0
     deep_analysis_version: int = 2

@@ -58,3 +58,24 @@ def test_extended_probe_collects_hdr_and_stream_counts(monkeypatch):
     assert result["extended"]["hdr_format"] == "HDR10/PQ"
     assert result["extended"]["subtitle_stream_count"] == 1
     assert result["extended"]["chapter_count"] == 1
+
+
+def test_standard_probe_accepts_timeout_override(monkeypatch):
+    captured = {}
+
+    def fake_run(command, timeout, cancel_event=None):
+        captured["timeout"] = timeout
+        payload = {
+            "format": {"format_name": "matroska", "duration": "120"},
+            "streams": [{"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080}],
+        }
+        return probe_module.subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(probe_module, "_run_hidden", fake_run)
+    result, error = probe_module.probe_media(
+        Path("Movie.mkv"), profile="standard", timeout_override=4
+    )
+
+    assert error is None
+    assert captured["timeout"] == 4
+    assert result["video_codec"] == "h264"
