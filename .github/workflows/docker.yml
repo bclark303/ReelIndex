@@ -36,9 +36,9 @@ jobs:
             --volume "${RUNNER_TEMP}/reelindex-data:/data" \
             --volume "${RUNNER_TEMP}/reelindex-media:/media:ro" \
             reelindex:smoke
-      - name: Validate health, tools, and shared UI
+      - name: Validate health, schema, tools, and shared UI
         run: |
-          rm -f health.json
+          rm -f health.json scans.json stats.json
           healthy=false
           for attempt in {1..75}; do
             running="$(docker inspect --format '{{.State.Running}}' reelindex-smoke 2>/dev/null || true)"
@@ -61,13 +61,20 @@ jobs:
             docker logs reelindex-smoke || true
             exit 1
           fi
+          curl --fail --silent --show-error --output scans.json http://127.0.0.1:18080/api/scans
+          curl --fail --silent --show-error --output stats.json http://127.0.0.1:18080/api/stats
           python - <<'PY'
           import json
-          payload = json.load(open('health.json', encoding='utf-8'))
-          assert payload['status'] == 'ok', payload
-          assert payload['version'] == '1.4.6', payload
-          assert payload['edition'] == 'Docker / Unraid', payload
+          health = json.load(open('health.json', encoding='utf-8'))
+          scans = json.load(open('scans.json', encoding='utf-8'))
+          stats = json.load(open('stats.json', encoding='utf-8'))
+          assert health['status'] == 'ok', health
+          assert health['version'] == '1.4.6', health
+          assert health['edition'] == 'Docker / Unraid', health
+          assert isinstance(scans, list), scans
+          assert isinstance(stats, dict), stats
           PY
+          docker exec reelindex-smoke python -c "import sqlite3; db=sqlite3.connect('/data/reelindex.db'); tables={row[0] for row in db.execute(\"select name from sqlite_master where type='table'\")}; required={'sources','movies','media_files','scan_runs'}; missing=required-tables; assert not missing, missing; mode=db.execute('pragma journal_mode').fetchone()[0].lower(); assert mode == 'delete', mode"
           curl --fail --silent --show-error http://127.0.0.1:18080/ | grep -q 'ReelIndex 1.4.6'
           docker exec reelindex-smoke ffprobe -version
           docker exec reelindex-smoke mediainfo --Version
