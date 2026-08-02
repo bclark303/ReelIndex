@@ -2004,6 +2004,12 @@ class ScanManager:
 
     @staticmethod
     def _apply_technical(record: MediaFile, technical: dict[str, Any], error: str | None) -> None:
+        try:
+            previous_payload = json.loads(record.probe_json or "{}")
+            if not isinstance(previous_payload, dict):
+                previous_payload = {}
+        except json.JSONDecodeError:
+            previous_payload = {}
         previous = ScanManager._analysis_marker(record.probe_json)
         previous_deep_attempts = ScanManager._deep_attempt_count(record.probe_json)
         analysis_mode = str(technical.get("analysis_mode") or "unknown").lower()
@@ -2020,6 +2026,16 @@ class ScanManager:
         status = technical.get("analysis_status") or (
             "deferred" if error and "timed out" in error.lower() else "failed" if error else "complete"
         )
+        history = previous_payload.get("failure_history")
+        if not isinstance(history, list):
+            history = []
+        if error:
+            history.append({
+                "attempted_at": utcnow().isoformat(),
+                "strategy": technical.get("analysis_profile") or technical.get("probe_profile") or "scan",
+                "error": error,
+                "status": status,
+            })
         payload = {
             "_reelindex": {
                 "source": technical.get("analysis_source") or "unknown",
@@ -2034,6 +2050,7 @@ class ScanManager:
             },
             "extended": technical.get("extended") or {},
             "raw": technical.get("raw", technical),
+            "failure_history": history[-12:],
         }
         record.probe_json = json.dumps(payload, default=str)
         record.probe_error = error

@@ -19,6 +19,7 @@ from app.schemas.api import (
 )
 
 from app.services.tmdb import TmdbClient, clean_release_title
+from app.services.probe_failures import diagnose_probe_failure
 
 router = APIRouter(tags=["movies"])
 
@@ -161,6 +162,7 @@ def get_movie(movie_id: str, db: Session = Depends(get_db)):
             probe = json.loads(file.probe_json or "{}")
         except json.JSONDecodeError:
             probe = {}
+        diagnosis = diagnose_probe_failure(file.probe_error, probe, file.path) if file.probe_error else None
         files.append(
             MediaFileOut(
                 id=file.id,
@@ -180,6 +182,11 @@ def get_movie(movie_id: str, db: Session = Depends(get_db)):
                 audio_channels=file.audio_channels,
                 audio_languages=file.audio_languages,
                 probe_error=file.probe_error,
+                probe_failure_category=diagnosis.category if diagnosis else None,
+                probe_failure_title=diagnosis.title if diagnosis else None,
+                probe_failure_summary=diagnosis.summary if diagnosis else None,
+                probe_failure_suggestions=list(diagnosis.suggestions) if diagnosis else [],
+                probe_recommended_action=diagnosis.recommended_action if diagnosis else None,
                 probe=probe,
             )
         )

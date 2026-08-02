@@ -1,0 +1,2 @@
+895497f0493c0c2fda41bb2c72485f52cc3403e1f9beaee9e74f960f1f320d07  ReelIndex-Windows-Setup-v1.4.4.exe
+219d44c2eabe6999dbca37917229b1a54fdacf984fd9db6cdc0d6904869c652d  reelindex-windows-v1.4.4-update.zip

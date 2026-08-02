@@ -83,6 +83,11 @@ class MediaFileOut(BaseModel):
     audio_channels: float | None
     audio_languages: str | None
     probe_error: str | None
+    probe_failure_category: str | None = None
+    probe_failure_title: str | None = None
+    probe_failure_summary: str | None = None
+    probe_failure_suggestions: list[str] = Field(default_factory=list)
+    probe_recommended_action: str | None = None
     probe: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -180,3 +185,60 @@ class PosterSearchResponse(BaseModel):
 class PosterSelection(BaseModel):
     tmdb_id: int = Field(gt=0)
     media_type: Literal["movie", "tv"] = "movie"
+
+
+class ProbeFailureItem(BaseModel):
+    file_id: str
+    movie_id: str
+    movie_title: str
+    movie_year: int | None = None
+    source_id: str
+    source_name: str
+    filename: str
+    path: str
+    size_bytes: int | None = None
+    container: str | None = None
+    error: str
+    category: str
+    diagnosis_title: str
+    diagnosis_summary: str
+    severity: Literal["info", "warning", "error"]
+    retryable: bool
+    recommended_action: str
+    suggestions: list[str] = Field(default_factory=list)
+    analysis_source: str | None = None
+    analysis_profile: str | None = None
+    analysis_status: str | None = None
+    attempt_count: int = 0
+    deep_attempt_count: int = 0
+    attempted_at: str | None = None
+    updated_at: datetime
+
+
+class ProbeFailureSummary(BaseModel):
+    total: int
+    by_category: dict[str, int] = Field(default_factory=dict)
+    by_container: dict[str, int] = Field(default_factory=dict)
+    by_source: dict[str, int] = Field(default_factory=dict)
+
+
+class PaginatedProbeFailures(BaseModel):
+    items: list[ProbeFailureItem]
+    total: int
+    page: int
+    page_size: int
+    summary: ProbeFailureSummary
+
+
+class ProbeRetryRequest(BaseModel):
+    strategy: Literal["auto", "extended", "ffprobe"] = "auto"
+
+
+class ProbeRetryResponse(BaseModel):
+    ok: bool
+    file_id: str
+    strategy: str
+    message: str
+    resolved: bool
+    error: str | None = None
+    analysis_source: str | None = None

@@ -7,7 +7,7 @@
   const globalError = document.getElementById('global-error');
   const state = {
     page: (location.hash.replace('#','') || 'library'), sources: [], scans: [], view: localStorage.getItem('reelindex-view') || 'grid',
-    query: {sort:'title', direction:'asc', page:1, page_size:100}, searchDraft:'', movies:null, stats:null, diagnostics:null, loading:false,
+    query: {sort:'title', direction:'asc', page:1, page_size:100}, failureQuery:{page:1,page_size:50}, searchDraft:'', failureSearchDraft:'', movies:null, probeFailures:null, stats:null, diagnostics:null, loading:false,
     sourceModal:null, selectedMovie:null, pollTimer:null, lastActiveRefresh:0,
     scanLog:{runId:null,cursor:0,events:[],tailLoaded:false,autoScroll:true,error:null,pinned:false}
   };
@@ -52,7 +52,9 @@
     posterSearch:(id,q,year,includeTv=true)=>{const p=new URLSearchParams({q,include_tv:String(includeTv),limit:'24'});if(year)p.set('year',String(year));return request(`/movies/${encodeURIComponent(id)}/poster/search?${p}`)},
     selectPoster:(id,tmdbId,mediaType)=>request(`/movies/${encodeURIComponent(id)}/poster/tmdb`,{method:'POST',body:JSON.stringify({tmdb_id:tmdbId,media_type:mediaType})}),
     uploadPoster:(id,file)=>{const form=new FormData();form.append('poster',file);return request(`/movies/${encodeURIComponent(id)}/poster/upload`,{method:'POST',body:form})},
-    clearPoster:id=>request(`/movies/${encodeURIComponent(id)}/poster`,{method:'DELETE'})
+    clearPoster:id=>request(`/movies/${encodeURIComponent(id)}/poster`,{method:'DELETE'}),
+    probeFailures:q=>{const p=new URLSearchParams();Object.entries(q||{}).forEach(([k,v])=>{if(v!==undefined&&v!==''&&v!==false)p.set(k,String(v));});return request('/probe-failures?'+p)},
+    retryProbe:(id,strategy='auto')=>request(`/media-files/${encodeURIComponent(id)}/probe/retry`,{method:'POST',body:JSON.stringify({strategy})})
   };
   function loading(label='Loading'){ return `<div class="loading"><span class="spinner"></span><span>${esc(label)}</span></div>`; }
   function empty(title,message,action=''){ return `<div class="empty-state">${icon('film',42)}<h2>${esc(title)}</h2><p>${esc(message)}</p>${action}</div>`; }
@@ -79,7 +81,52 @@
     overlay.innerHTML='';
     if(state.page==='sources') return renderSources(true);
     if(state.page==='diagnostics') return renderDiagnostics(true);
+    if(state.page==='failures') return renderProbeFailures(true);
     return renderLibrary(true);
+  }
+
+
+  async function loadProbeFailures(){
+    state.loading=true;renderProbeFailures(false);
+    try{state.probeFailures=await api.probeFailures(state.failureQuery);showError('');}
+    catch(e){showError(e.message);state.probeFailures=null;}
+    state.loading=false;renderProbeFailures(false);
+  }
+  function categoryLabel(value){return ({timeout:'Timeout',missing_path:'Path unavailable',permission:'Permission',analyzer_missing:'Analyzer missing',container_parse:'Container parse',incomplete:'Incomplete metadata',network_io:'Network / storage',interrupted:'Interrupted',unknown:'Other'})[value]||String(value||'Other').replaceAll('_',' ');}
+  function failureActionLabel(value){return ({retry_auto:'Retry native',retry_extended:'Extended retry',retry_ffprobe:'ffprobe retry',check_source:'Check source',check_permissions:'Check permissions',repair_install:'Repair install'})[value]||'Review';}
+  function renderProbeFailures(initial=false){
+    if(initial&&!state.probeFailures&&!state.loading){main.innerHTML=loading('Loading probe failures');loadProbeFailures();return;}
+    const d=state.probeFailures;
+    const q=state.failureQuery;
+    const summary=d?.summary||{total:0,by_category:{},by_container:{}};
+    const categories=Object.entries(summary.by_category||{}).sort((a,b)=>b[1]-a[1]);
+    const containers=Object.entries(summary.by_container||{}).sort((a,b)=>b[1]-a[1]);
+    main.innerHTML=`<section class="page-heading split-heading"><div><span class="eyebrow">Technical analysis remediation</span><h1>Probe failures</h1><p>See which files failed, why they failed, and retry them one at a time without rescanning the entire library.</p></div><button class="button secondary" id="refresh-failures">${icon('refresh',17)}Refresh</button></section>
+    <div class="failure-summary"><article><strong>${summary.total||0}</strong><span>Current failures</span></article>${categories.slice(0,4).map(([key,count])=>`<article><strong>${count}</strong><span>${esc(categoryLabel(key))}</span></article>`).join('')}</div>
+    <section class="toolbar-card failure-toolbar"><div class="search-box">${icon('search')}<input id="failure-search" value="${esc(state.failureSearchDraft)}" placeholder="Search title, filename, path, or error…"/><button class="clear-search ${state.failureSearchDraft?'':'hidden'}" id="clear-failure-search">${icon('x',16)}</button></div><div class="toolbar-actions"><select id="failure-source"><option value="">All sources</option>${state.sources.map(source=>`<option value="${source.id}" ${q.source_id===source.id?'selected':''}>${esc(source.name)}</option>`).join('')}</select><select id="failure-category"><option value="">All causes</option>${categories.map(([key,count])=>`<option value="${esc(key)}" ${q.category===key?'selected':''}>${esc(categoryLabel(key))} (${count})</option>`).join('')}</select><select id="failure-container"><option value="">All containers</option>${containers.map(([key,count])=>`<option value="${esc(key)}" ${q.container===key?'selected':''}>${esc(key.toUpperCase())} (${count})</option>`).join('')}</select></div></section>
+    ${state.loading?loading('Loading probe failures'):renderFailureResults()}`;
+    bindProbeFailures();
+  }
+  function renderFailureResults(){
+    const d=state.probeFailures;if(!d)return `<div class="error-panel">${icon('warning')}<div><strong>Could not load probe failures</strong><p>Check Diagnostics or restart ReelIndex.</p></div></div>`;
+    if(!d.items.length)return empty('No matching probe failures','Every indexed file in this view currently has usable technical metadata.');
+    const pages=Math.max(1,Math.ceil(d.total/d.page_size));
+    return `<div class="failure-list">${d.items.map(failureCard).join('')}</div>${pages>1?`<div class="pagination"><button class="button secondary small" id="prev-failure-page" ${d.page<=1?'disabled':''}>Previous</button><span>Page ${d.page} of ${pages}</span><button class="button secondary small" id="next-failure-page" ${d.page>=pages?'disabled':''}>Next</button></div>`:''}`;
+  }
+  function failureCard(item){
+    const suggested=item.suggestions?.[0]||item.diagnosis_summary;
+    const retryable=item.retryable;
+    return `<article class="failure-card severity-${esc(item.severity)}"><div class="failure-card-head"><div><span class="failure-category">${esc(categoryLabel(item.category))}</span><h2>${esc(item.movie_title)}${item.movie_year?` <small>(${item.movie_year})</small>`:''}</h2><p>${esc(item.filename)}</p></div><div class="failure-attempts"><strong>${item.deep_attempt_count||item.attempt_count||0}</strong><span>attempts</span></div></div><div class="failure-diagnosis"><div class="failure-icon">${icon('warning',20)}</div><div><strong>${esc(item.diagnosis_title)}</strong><p>${esc(item.diagnosis_summary)}</p></div></div><div class="failure-error"><code>${esc(item.error)}</code></div><div class="failure-meta"><span>${esc((item.container||'unknown').toUpperCase())}</span><span>${fmtBytes(item.size_bytes)}</span><span>${esc(item.source_name)}</span><span>${item.attempted_at?fmtDate(item.attempted_at):fmtDate(item.updated_at)}</span></div><div class="path-box">${icon('folder',15)}<code>${esc(item.path)}</code></div><div class="failure-remedy"><span>${icon('info',16)}${esc(suggested)}</span><div class="failure-actions"><button class="button ghost small" data-open-failure-movie="${item.movie_id}">Open movie</button>${retryable?`<button class="button secondary small" data-retry-probe="${item.file_id}" data-strategy="auto">Retry native</button><button class="button secondary small" data-retry-probe="${item.file_id}" data-strategy="extended">Extended</button><button class="button secondary small" data-retry-probe="${item.file_id}" data-strategy="ffprobe">ffprobe</button>`:`<span class="status-pill warning">${esc(failureActionLabel(item.recommended_action))}</span>`}</div></div></article>`;
+  }
+  function bindProbeFailures(){
+    document.getElementById('refresh-failures')?.addEventListener('click',loadProbeFailures);
+    const search=document.getElementById('failure-search');let timer;search?.addEventListener('input',e=>{state.failureSearchDraft=e.target.value;document.getElementById('clear-failure-search').classList.toggle('hidden',!state.failureSearchDraft);clearTimeout(timer);timer=setTimeout(()=>{state.failureQuery.search=state.failureSearchDraft||undefined;state.failureQuery.page=1;loadProbeFailures();},240);});
+    document.getElementById('clear-failure-search')?.addEventListener('click',()=>{state.failureSearchDraft='';state.failureQuery.search=undefined;state.failureQuery.page=1;loadProbeFailures();});
+    [['failure-source','source_id'],['failure-category','category'],['failure-container','container']].forEach(([id,key])=>document.getElementById(id)?.addEventListener('change',e=>{state.failureQuery[key]=e.target.value||undefined;state.failureQuery.page=1;loadProbeFailures();}));
+    document.querySelectorAll('[data-open-failure-movie]').forEach(button=>button.onclick=()=>openMovie(button.dataset.openFailureMovie));
+    document.querySelectorAll('[data-retry-probe]').forEach(button=>button.onclick=async()=>{const original=button.textContent;button.disabled=true;button.textContent='Probing…';try{const result=await api.retryProbe(button.dataset.retryProbe,button.dataset.strategy);toast(result.resolved?'Probe failure resolved':(result.error||result.message),result.resolved?'success':'error');state.movies=null;state.stats=null;await loadProbeFailures();}catch(error){toast(error.message,'error');button.disabled=false;button.textContent=original;}});
+    document.getElementById('prev-failure-page')?.addEventListener('click',()=>{state.failureQuery.page=Math.max(1,(state.failureQuery.page||1)-1);loadProbeFailures();scrollTo(0,0);});
+    document.getElementById('next-failure-page')?.addEventListener('click',()=>{state.failureQuery.page=(state.failureQuery.page||1)+1;loadProbeFailures();scrollTo(0,0);});
   }
 
   async function loadLibrary(){
@@ -126,6 +173,7 @@
       overlay.querySelector('.detail-drawer').innerHTML=`<button class="icon-button drawer-close" data-close>${icon('x')}</button><div class="detail-hero"><div class="detail-poster-wrap">${m.poster_url?`<img class="detail-poster" src="${m.poster_url}" alt="${esc(m.title)} poster"/>`:`<div class="detail-poster">${placeholder(m.title)}</div>`}<button class="button secondary small poster-manage" id="manage-poster">${icon('edit',15)}Manage poster</button>${posterSource?`<span class="poster-source-label">${esc(posterSource)}</span>`:''}</div><div class="detail-heading"><span class="eyebrow">${esc(m.source_name)}</span><h1>${esc(m.title)}</h1><div class="detail-heading-meta"><span>${m.year||'Unknown year'}</span><span>${fmtRuntime(m.runtime_seconds)}</span><span>${m.file_count} file${m.file_count===1?'':'s'}</span></div><div class="badge-list">${badges(m.resolutions,true)}${badges(m.video_codecs)}${badges(m.containers)}</div></div></div>${m.overview?`<p class="overview">${esc(m.overview)}</p>`:''}<div class="detail-summary-grid"><div class="detail-item"><span>Total size</span><strong>${fmtBytes(m.total_size_bytes)}</strong></div><div class="detail-item"><span>Source</span><strong>${esc(m.source_type)}</strong></div><div class="detail-item"><span>Files</span><strong>${m.file_count}</strong></div><div class="detail-item"><span>Updated</span><strong>${fmtDate(m.updated_at)}</strong></div></div><section class="detail-section"><div class="section-heading"><div><span class="eyebrow">Technical inventory</span><h2>Media files</h2></div>${icon('database')}</div><div class="file-stack">${m.files.map((f,i)=>fileCard(f,i)).join('')}</div></section>`;
       overlay.querySelector('[data-close]').onclick=()=>overlay.innerHTML='';
       overlay.querySelector('#manage-poster').onclick=()=>openPosterManager(m);
+      overlay.querySelectorAll('[data-file-retry]').forEach(button=>button.onclick=async()=>{const original=button.textContent;button.disabled=true;button.textContent='Probing…';try{const result=await api.retryProbe(button.dataset.fileRetry,button.dataset.strategy);toast(result.resolved?'Probe failure resolved':(result.error||result.message),result.resolved?'success':'error');state.movies=null;state.stats=null;if(state.page==='failures')await loadProbeFailures();else await loadLibrary();openMovie(m.id);}catch(error){toast(error.message,'error');button.disabled=false;button.textContent=original;}});
     }catch(e){
       overlay.querySelector('.detail-drawer').innerHTML=`<button class="icon-button drawer-close" data-close>${icon('x')}</button><div class="error-panel">${icon('warning')}<p>${esc(e.message)}</p></div>`;
       overlay.querySelector('[data-close]').onclick=()=>overlay.innerHTML='';
@@ -175,7 +223,10 @@
     };
   }
 
-  function fileCard(f,i){return `<article class="file-card"><div class="file-card-header"><div><span class="file-index">File ${i+1}${f.edition?` · ${esc(f.edition)}`:''}</span><h3>${esc(f.filename)}</h3><p>${fmtBytes(f.size_bytes)} · ${fmtRuntime(f.duration_seconds)}</p></div><div class="badge-list">${f.resolution_label?`<span class="badge badge-solid">${esc(f.resolution_label)}</span>`:''}${f.container?`<span class="badge">${esc(f.container)}</span>`:''}</div></div>${f.probe_error?`<div class="inline-warning">${icon('warning',16)}<span>${esc(f.probe_error)}</span></div>`:''}<div class="technical-grid">${[['Video codec',f.video_codec],['Dimensions',f.width&&f.height?`${f.width}×${f.height}`:null],['Video bitrate',fmtBitrate(f.video_bitrate)],['Audio codec',f.audio_codec],['Audio channels',f.audio_channels],['Audio language',f.audio_languages],['Container',f.container],['Runtime',fmtRuntime(f.duration_seconds)]].map(([k,v])=>`<div class="detail-item"><span>${k}</span><strong>${esc(v||'—')}</strong></div>`).join('')}</div><div class="path-box">${icon('folder',15)}<code>${esc(f.path)}</code></div><details class="raw-details"><summary>Raw analyzer information</summary><pre>${esc(JSON.stringify(f.probe,null,2))}</pre></details></article>`;}
+  function fileCard(f,i){
+    const failure=f.probe_error?`<div class="probe-failure-detail"><div class="probe-failure-heading">${icon('warning',18)}<div><strong>${esc(f.probe_failure_title||'Probe failed')}</strong><p>${esc(f.probe_failure_summary||f.probe_error)}</p></div></div><div class="inline-warning"><span>${esc(f.probe_error)}</span></div>${f.probe_failure_suggestions?.length?`<ul>${f.probe_failure_suggestions.map(item=>`<li>${esc(item)}</li>`).join('')}</ul>`:''}<div class="failure-actions"><button class="button secondary small" data-file-retry="${f.id}" data-strategy="auto">Retry native</button><button class="button secondary small" data-file-retry="${f.id}" data-strategy="extended">Extended retry</button><button class="button secondary small" data-file-retry="${f.id}" data-strategy="ffprobe">ffprobe retry</button></div></div>`:'';
+    return `<article class="file-card"><div class="file-card-header"><div><span class="file-index">File ${i+1}${f.edition?` · ${esc(f.edition)}`:''}</span><h3>${esc(f.filename)}</h3><p>${fmtBytes(f.size_bytes)} · ${fmtRuntime(f.duration_seconds)}</p></div><div class="badge-list">${f.resolution_label?`<span class="badge badge-solid">${esc(f.resolution_label)}</span>`:''}${f.container?`<span class="badge">${esc(f.container)}</span>`:''}</div></div>${failure}<div class="technical-grid">${[['Video codec',f.video_codec],['Dimensions',f.width&&f.height?`${f.width}×${f.height}`:null],['Video bitrate',fmtBitrate(f.video_bitrate)],['Audio codec',f.audio_codec],['Audio channels',f.audio_channels],['Audio language',f.audio_languages],['Container',f.container],['Runtime',fmtRuntime(f.duration_seconds)]].map(([k,v])=>`<div class="detail-item"><span>${k}</span><strong>${esc(v||'—')}</strong></div>`).join('')}</div><div class="path-box">${icon('folder',15)}<code>${esc(f.path)}</code></div><details class="raw-details"><summary>Raw analyzer information</summary><pre>${esc(JSON.stringify(f.probe,null,2))}</pre></details></article>`;
+  }
 
   function preferredLiveRun(){
     const current=state.scans.find(scan=>scan.id===state.scanLog.runId);

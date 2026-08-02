@@ -369,3 +369,41 @@ input { height: 44px; padding: 0 12px; width: 100%; }
   .poster-manager-current { grid-template-columns: 80px 1fr; }
   .poster-manager-current img, .poster-current-empty { width: 80px; }
 }
+
+/* Probe failure remediation */
+.failure-summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:18px; }
+.failure-summary article { padding:16px 18px; border:1px solid var(--border); border-radius:12px; background:var(--panel); display:flex; flex-direction:column; gap:4px; }
+.failure-summary strong { font-size:24px; }
+.failure-summary span { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+.failure-toolbar { align-items:center; }
+.failure-toolbar .toolbar-actions { flex-wrap:wrap; }
+.failure-list { display:grid; gap:14px; }
+.failure-card { border:1px solid var(--border); border-left:4px solid #c89d4d; border-radius:12px; background:var(--panel); padding:18px; display:grid; gap:13px; }
+.failure-card.severity-error { border-left-color:#c85a5a; }
+.failure-card.severity-info { border-left-color:#5f8fc7; }
+.failure-card-head { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; }
+.failure-card-head h2 { margin:4px 0 3px; font-size:18px; }
+.failure-card-head h2 small { color:var(--muted); font-weight:500; }
+.failure-card-head p { margin:0; color:var(--muted); overflow-wrap:anywhere; }
+.failure-category { display:inline-flex; padding:3px 7px; border-radius:999px; background:rgba(200,157,77,.14); color:#e2bc72; font-size:10px; text-transform:uppercase; letter-spacing:.08em; }
+.failure-attempts { min-width:70px; text-align:right; }
+.failure-attempts strong { display:block; font-size:20px; }
+.failure-attempts span { color:var(--muted); font-size:11px; text-transform:uppercase; }
+.failure-diagnosis { display:flex; gap:11px; padding:13px; background:rgba(255,255,255,.025); border-radius:9px; }
+.failure-diagnosis strong { display:block; margin-bottom:3px; }
+.failure-diagnosis p { margin:0; color:var(--muted); }
+.failure-icon { color:#d5a94f; }
+.failure-error { padding:10px 12px; border-radius:8px; background:#090b0f; border:1px solid rgba(255,255,255,.06); overflow:auto; }
+.failure-error code { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; color:#e0b5b5; }
+.failure-meta { display:flex; flex-wrap:wrap; gap:8px 16px; color:var(--muted); font-size:12px; }
+.failure-remedy { display:flex; justify-content:space-between; align-items:center; gap:18px; padding-top:2px; }
+.failure-remedy>span { display:flex; align-items:center; gap:7px; color:var(--muted); }
+.failure-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.probe-failure-detail { border:1px solid rgba(200,157,77,.28); background:rgba(200,157,77,.07); border-radius:10px; padding:14px; margin:12px 0; }
+.probe-failure-heading { display:flex; gap:9px; align-items:flex-start; }
+.probe-failure-heading strong { display:block; margin-bottom:3px; }
+.probe-failure-heading p { margin:0; color:var(--muted); }
+.probe-failure-detail .inline-warning { margin:10px 0; }
+.probe-failure-detail ul { margin:8px 0 12px 20px; color:var(--muted); }
+.probe-failure-detail li { margin:4px 0; }
+@media (max-width:800px){ .failure-remedy,.failure-card-head { flex-direction:column; } .failure-attempts{text-align:left;} }

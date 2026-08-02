@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
 from app.api.movies import router as movies_router
+from app.api.probes import router as probes_router
 from app.api.scans import router as scans_router
 from app.api.sources import router as sources_router
 from app.api.system import router as system_router
@@ -53,7 +54,7 @@ async def lifespan(app: FastAPI):
     scan_scheduler.shutdown()
 
 
-app = FastAPI(title=settings.app_name, version="1.4.3", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.4.4", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -75,6 +76,7 @@ app.include_router(system_router, prefix=settings.api_prefix)
 app.include_router(sources_router, prefix=settings.api_prefix)
 app.include_router(scans_router, prefix=settings.api_prefix)
 app.include_router(movies_router, prefix=settings.api_prefix)
+app.include_router(probes_router, prefix=settings.api_prefix)
 
 
 if settings.static_dir and settings.static_dir.exists():
