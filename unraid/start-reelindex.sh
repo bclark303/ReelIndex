@@ -13,6 +13,7 @@ fi
 umask "$UMASK_VALUE"
 mkdir -p \
     /data/posters \
+    /data/logs \
     /tmp/nginx/client_temp \
     /tmp/nginx/proxy_temp \
     /tmp/nginx/fastcgi_temp \
