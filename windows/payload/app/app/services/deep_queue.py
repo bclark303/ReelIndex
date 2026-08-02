@@ -109,7 +109,14 @@ class DeepQueueStore:
             pending = list(payload.get("pending") or [])
             if record_id not in pending:
                 return payload
-            if not keep_pending:
+            if keep_pending:
+                # Move a timed-out record behind untouched work. This prevents a
+                # resumed queue from repeatedly spending its first timeout window
+                # on the same problematic files while thousands of untried files
+                # wait behind them.
+                pending.remove(record_id)
+                pending.append(record_id)
+            else:
                 pending.remove(record_id)
             payload["pending"] = pending
             payload["completed"] = int(payload.get("completed") or 0) + 1

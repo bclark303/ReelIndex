@@ -143,3 +143,7 @@ Version 1.3.1 submits only a bounded worker window instead of creating one futur
 
 After a full worker batch times out, ReelIndex waits briefly and runs one serial recovery probe. A successful recovery continues the queue at reduced concurrency; a second timeout pauses the queue cleanly with a single summary event.
 
+
+## Version 1.3.2 adaptive deep-scan continuation
+
+Version 1.3.2 keeps a deep queue moving through isolated SMB/ffprobe timeout clusters. A timeout batch reduces concurrency and enters up to three serial recovery checks. Any responsive recovery file resumes the queue at a lower worker count; only repeated consecutive serial timeouts pause untouched work. Standard deep probes now use an eight-second limit, extended probes use twenty seconds, and technical-only deep scans reuse healthy cached local posters instead of copying them again.

@@ -55,6 +55,6 @@ def test_deferred_attempt_can_remain_resumable(tmp_path: Path):
     )
     payload = store.mark_complete("run-3", "a", "deferred", keep_pending=True)
     assert payload is not None
-    assert payload["pending"] == ["a", "b"]
+    assert payload["pending"] == ["b", "a"]
     assert payload["deferred"] == 1
     assert store.info("run-3")["queue_remaining"] == 2

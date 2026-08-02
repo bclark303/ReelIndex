@@ -484,9 +484,13 @@ class ScanManager:
                 destination = settings.data_dir / "posters" / source_id / f"{movie.id}.jpg"
                 local_poster = candidate.metadata.get("origin") == "filesystem" and bool(candidate.poster_ref)
                 if local_poster:
-                    # A local sidecar is authoritative and should replace an older
-                    # TMDB/server cache on the next scan.
-                    poster_jobs.append(PosterJob(movie.id, candidate.title, candidate, destination))
+                    # A local sidecar is authoritative. Quick scans refresh it, while
+                    # technical-only deep scans reuse a healthy cached copy instead of
+                    # recopying every poster over SMB.
+                    if mode == "deep" and destination.exists() and destination.stat().st_size > 100:
+                        movie.poster_path = str(destination)
+                    else:
+                        poster_jobs.append(PosterJob(movie.id, candidate.title, candidate, destination))
                 elif destination.exists() and destination.stat().st_size > 100:
                     movie.poster_path = str(destination)
                 elif candidate.poster_ref or tmdb_token:
@@ -677,8 +681,22 @@ class ScanManager:
                 )
             ).all()
             by_id = {record.id: record for record in records}
+            original_position = {record_id: index for index, record_id in enumerate(pending_ids)}
+            ordered_ids = sorted(
+                (record_id for record_id in pending_ids if record_id in by_id),
+                key=lambda record_id: (
+                    int(self._analysis_marker(by_id[record_id].probe_json).get("attempt_count") or 0),
+                    original_position[record_id],
+                ),
+            )
+            attempt_counts = [
+                int(self._analysis_marker(by_id[record_id].probe_json).get("attempt_count") or 0)
+                for record_id in ordered_ids
+            ]
+            minimum_attempts = min(attempt_counts, default=0)
+            deprioritized = sum(1 for count in attempt_counts if count > minimum_attempts)
             jobs: list[ProbeJob] = []
-            for record_id in pending_ids:
+            for record_id in ordered_ids:
                 record = by_id.get(record_id)
                 if not record:
                     continue
@@ -705,7 +723,18 @@ class ScanManager:
             f"Resumed persistent queue with {len(jobs):,} remaining files",
             queue_remaining=len(jobs),
             scope=manifest.get("scope") or "incomplete",
+            least_attempts=minimum_attempts,
+            deprioritized_retries=deprioritized,
         )
+        if deprioritized:
+            scan_event_store.append(
+                run_id,
+                "info",
+                "deep-queue",
+                f"Prioritized least-attempted files; moved {deprioritized:,} previously retried records later in the queue",
+                deprioritized_retries=deprioritized,
+                least_attempts=minimum_attempts,
+            )
         probe_result = self._run_probe_jobs(
             run_id, jobs, cancel_event, "deep", verbose=runtime_settings.verbose_scan_logging(), persistent_queue=True
         )
@@ -782,6 +811,8 @@ class ScanManager:
         submitted_at: dict[Future[tuple[dict[str, Any], str | None]], float] = {}
         active_limit = workers
         recovery_attempts = 0
+        recovery_chain = 0
+        recovery_target_limit = max(1, workers // 2)
         canary_active = False
         canary_outcome: str | None = None
 
@@ -925,37 +956,51 @@ class ScanManager:
                             db.commit()
 
                     # Submit replacements only while the analyzer circuit remains healthy.
-                    # This bounded window prevents thousands of no-op deferred futures
-                    # after a timeout circuit opens. A single serial canary distinguishes
-                    # a bad batch or sleeping disk from a source-wide failure.
+                    # A timeout batch reduces concurrency and enters a bounded serial
+                    # recovery chain. One responsive canary (success or a fast ordinary
+                    # failure) proves the share is reachable and lets the queue continue;
+                    # only repeated serial timeouts pause untouched work.
                     if canary_active and not futures:
-                        if canary_outcome == "succeeded":
-                            active_limit = max(1, workers // 2)
+                        canary_active = False
+                        if canary_outcome != "deferred":
+                            active_limit = recovery_target_limit
                             ffprobe_circuit = AnalyzerCircuitBreaker("ffprobe", threshold=active_limit)
-                            canary_active = False
-                            canary_outcome = None
+                            recovery_chain = 0
+                            level = "success" if canary_outcome == "succeeded" else "warning"
+                            label = "succeeded" if canary_outcome == "succeeded" else "responded without timing out"
                             scan_event_store.append(
                                 run_id,
-                                "success",
+                                level,
                                 "ffprobe",
-                                f"Serial recovery probe succeeded; continuing with {active_limit} workers",
+                                f"Serial recovery probe {label}; continuing with {active_limit} worker{'s' if active_limit != 1 else ''}",
                                 recovery_workers=active_limit,
+                                recovery_outcome=canary_outcome,
                             )
+                            canary_outcome = None
                         else:
-                            canary_active = False
+                            canary_outcome = None
 
                     if mode == "deep" and ffprobe_circuit.disabled and not futures:
-                        max_recoveries = max(0, settings.deep_probe_recovery_attempts)
-                        if waiting and recovery_attempts < max_recoveries:
+                        max_recoveries = max(1, settings.deep_probe_recovery_attempts)
+                        if waiting and recovery_chain < max_recoveries:
+                            if recovery_chain == 0:
+                                recovery_target_limit = max(1, active_limit // 2)
+                            recovery_chain += 1
                             recovery_attempts += 1
                             delay = max(0.0, float(settings.deep_probe_recovery_delay_seconds))
                             scan_event_store.append(
                                 run_id,
                                 "warning",
                                 "ffprobe",
-                                f"Probe batch timed out; waiting {delay:.1f}s before one serial recovery probe",
-                                recovery_attempt=recovery_attempts,
+                                (
+                                    f"Probe timeout circuit open; waiting {delay:.1f}s before serial "
+                                    f"recovery probe {recovery_chain}/{max_recoveries}"
+                                ),
+                                recovery_attempt=recovery_chain,
+                                recovery_attempt_total=recovery_attempts,
+                                recovery_limit=max_recoveries,
                                 recovery_delay_seconds=delay,
+                                recovery_target_workers=recovery_target_limit,
                             )
                             if cancel_event.wait(delay):
                                 raise ScanCancelled("Scan cancelled during deep-probe recovery delay")
@@ -1507,7 +1552,7 @@ class ScanManager:
                 event(
                     "warning",
                     "ffprobe",
-                    f"ffprobe timed out on {ffprobe_circuit.threshold} files; deferring the remaining deep queue",
+                    f"ffprobe timed out on {ffprobe_circuit.threshold} files; opening the deep-scan recovery circuit",
                 )
             status = "deferred" if standard_error and "timed out" in standard_error.lower() else "failed"
             technical = ScanManager._basic_file_technical(file_candidate, mode, standard_error)
