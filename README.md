@@ -13,11 +13,11 @@ browser interface.
 ## Download for Windows
 
 Download the fully offline Windows package from
-[`dist/ReelIndex-Windows-Setup-v1.4.8.1.exe`](dist/ReelIndex-Windows-Setup-v1.4.8.1.exe).
+[`dist/ReelIndex-Windows-Setup-v1.4.8.2.exe`](dist/ReelIndex-Windows-Setup-v1.4.8.2.exe).
 Its Microsoft Defender release-gate record is published beside it at
-[`dist/ReelIndex-Windows-Setup-v1.4.8.1.defender.json`](dist/ReelIndex-Windows-Setup-v1.4.8.1.defender.json).
+[`dist/ReelIndex-Windows-Setup-v1.4.8.2.defender.json`](dist/ReelIndex-Windows-Setup-v1.4.8.2.defender.json).
 
-Windows Setup package 1.4.8.1 contains ReelIndex application version 1.4.8. The
+Windows Setup package 1.4.8.2 contains ReelIndex application version 1.4.8. The
 installer bundles the Python runtime and Python dependencies, performs no
 network access or PowerShell execution on the user device, and verifies an
 embedded SHA-256 manifest before installing files.

@@ -19,7 +19,7 @@ import (
 )
 
 const appVersion = "1.4.8"
-const packageVersion = "1.4.8.1"
+const packageVersion = "1.4.8.2"
 
 //go:embed payload.zip
 var payload []byte
