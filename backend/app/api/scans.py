@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -10,6 +10,7 @@ from app.core.database import get_db
 from app.models import ScanRun, Source
 from app.schemas.api import ScanRunOut
 from app.services.scanner import scan_manager
+from app.services.scan_events import scan_event_store
 
 router = APIRouter(prefix="/scans", tags=["scans"])
 
@@ -74,3 +75,27 @@ def get_scan(run_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Scan not found")
     source = db.get(Source, run.source_id)
     return _out(run, source.name if source else None)
+
+
+@router.get("/{run_id}/events")
+def get_scan_events(
+    run_id: str,
+    cursor: int = Query(0, ge=0),
+    limit: int = Query(300, ge=1, le=1000),
+    tail: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    """Return live scan output after a byte-offset cursor."""
+    run = db.get(ScanRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    payload = scan_event_store.read(run_id, cursor=cursor, limit=limit, tail=tail)
+    payload.update(
+        {
+            "run_id": run.id,
+            "status": run.status,
+            "source_id": run.source_id,
+            "active": run.status in {"queued", "running", "cancelling"},
+        }
+    )
+    return payload

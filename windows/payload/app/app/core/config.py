@@ -43,3 +43,4 @@ class Settings(BaseSettings):
 settings = Settings()
 settings.data_dir.mkdir(parents=True, exist_ok=True)
 (settings.data_dir / "posters").mkdir(parents=True, exist_ok=True)
+(settings.data_dir / "scan-events").mkdir(parents=True, exist_ok=True)

@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.models import MediaFile, Movie, ScanRun, Source
 from app.services.scanner import scan_manager
+from app.services.scan_events import scan_event_store
 
 
 class MaintenanceBlocked(RuntimeError):
@@ -82,12 +83,15 @@ def reset_application_data(*, include_sources: bool) -> dict[str, Any]:
         db.commit()
 
     poster_files, poster_bytes = _clear_directory(settings.data_dir / "posters")
+    event_files, event_bytes = scan_event_store.clear_all(settings.data_dir / "scan-events")
     _vacuum_sqlite()
 
     if not include_sources:
         removed["sources"] = 0
     removed["poster_files"] = poster_files
     removed["poster_bytes"] = poster_bytes
+    removed["scan_event_files"] = event_files
+    removed["scan_event_bytes"] = event_bytes
 
     return {
         "status": "ok",

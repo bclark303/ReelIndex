@@ -24,6 +24,7 @@ from app.models import MediaFile, Movie, ScanRun, Source
 from app.services.media_utils import sort_title
 from app.services.mediainfo import MediaInfoCancelled, analyze_media_quick
 from app.services.probe import ProbeCancelled, probe_media
+from app.services.scan_events import scan_event_store
 from app.services.tmdb import TmdbClient
 from app.sources.factory import create_adapter
 
@@ -83,6 +84,15 @@ class ScanManager:
                 run_id = run.id
             self._active[source_id] = run_id
             self._cancel_events[run_id] = threading.Event()
+        scan_event_store.start_run(run_id)
+        scan_event_store.append(
+            run_id,
+            "info",
+            "queue",
+            f"{mode.title()} scan queued",
+            source_id=source_id,
+            mode=mode,
+        )
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(asyncio.to_thread(self._run_scan, source_id, run_id, mode))
@@ -106,6 +116,7 @@ class ScanManager:
             if not cancel_event:
                 return False
             cancel_event.set()
+        scan_event_store.append(run_id, "warning", "cancel", "Cancellation requested by user")
         with SessionLocal() as db:
             run = db.get(ScanRun, run_id)
             if run and run.status in {"queued", "running", "cancelling"}:
@@ -167,6 +178,7 @@ class ScanManager:
         try:
             self._execute_scan(source_id, run_id, cancel_event, mode)
         except ScanCancelled:
+            scan_event_store.append(run_id, "warning", "complete", "Scan cancelled")
             with SessionLocal() as db:
                 run = db.get(ScanRun, run_id)
                 if run:
@@ -176,6 +188,7 @@ class ScanManager:
                     db.commit()
         except Exception as exc:
             logger.exception("Scan failed for source %s", source_id)
+            scan_event_store.append(run_id, "error", "complete", f"Scan failed: {exc}")
             with SessionLocal() as db:
                 run = db.get(ScanRun, run_id)
                 if run:
@@ -203,6 +216,17 @@ class ScanManager:
             db.commit()
             config = reveal_config(json.loads(source.config_json or "{}"))
             adapter = create_adapter(source.type, source.url_or_path, source.library_id, config)
+            source_name = source.name
+            source_type = source.type
+
+        scan_event_store.append(
+            run_id,
+            "info",
+            "start",
+            f"Starting {mode} scan for {source_name}",
+            source_type=source_type,
+            mode=mode,
+        )
 
         last_progress_at = 0.0
         last_progress_files = 0
@@ -224,6 +248,13 @@ class ScanManager:
                     progress_run.discovered_count = file_count
                     progress_run.current_item = f"Discovering · {movie_count:,} movies / {file_count:,} files · {label}"
                     progress_db.commit()
+            scan_event_store.append(
+                run_id,
+                "info",
+                "discovery",
+                f"Discovered {movie_count:,} movies / {file_count:,} files",
+                location=label,
+            )
 
         candidates = self._run_cancellable_call(
             lambda: adapter.scan(progress=discovery_progress),
@@ -232,6 +263,12 @@ class ScanManager:
         )
         self._raise_if_cancelled(cancel_event)
         total_files = sum(len(movie.files) for movie in candidates)
+        scan_event_store.append(
+            run_id,
+            "success",
+            "discovery",
+            f"Discovery complete: {len(candidates):,} movies and {total_files:,} files",
+        )
         tmdb_token = config.get("tmdb_token") or settings.tmdb_api_token
         probe_jobs: list[ProbeJob] = []
         poster_jobs: list[PosterJob] = []
@@ -260,6 +297,15 @@ class ScanManager:
             for movie_index, candidate in enumerate(candidates, start=1):
                 self._raise_if_cancelled(cancel_event)
                 run.current_item = f"Indexing · {movie_index:,}/{len(candidates):,} · {candidate.title}"
+                scan_event_store.append(
+                    run_id,
+                    "info",
+                    "index",
+                    f"Indexing {candidate.title}",
+                    movie=movie_index,
+                    total_movies=len(candidates),
+                    files=len(candidate.files),
+                )
                 movie = existing_movies.get(candidate.source_movie_id)
                 if not movie:
                     movie = Movie(
@@ -320,6 +366,12 @@ class ScanManager:
 
                     if unchanged:
                         run.cached_count += 1
+                        scan_event_store.append(
+                            run_id,
+                            "debug",
+                            "cache",
+                            f"Cache hit: {file_candidate.filename}",
+                        )
                     elif self._has_server_technical(file_candidate.technical):
                         # Plex/Jellyfin/Emby already provide the fields needed by the
                         # competition. Do not reopen every media file over the network.
@@ -328,6 +380,12 @@ class ScanManager:
                         server_technical["analysis_mode"] = "deep"
                         self._apply_technical(file_record, server_technical, None)
                         run.analyzed_count += 1
+                        scan_event_store.append(
+                            run_id,
+                            "success",
+                            "analyze",
+                            f"Used media-server metadata: {file_candidate.filename}",
+                        )
                     else:
                         probe_jobs.append(ProbeJob(file_record.id, file_candidate.filename, file_candidate))
 
@@ -370,6 +428,12 @@ class ScanManager:
             run.current_item = None
             run.completed_at = utcnow()
             db.commit()
+        scan_event_store.append(
+            run_id,
+            "success",
+            "complete",
+            "Scan completed",
+        )
 
     def _run_probe_jobs(
         self,
@@ -384,8 +448,24 @@ class ScanManager:
         logger.info("Running %s analysis for %d files with %d workers", mode, len(jobs), workers)
 
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reelindex-probe")
+        scan_event_store.append(
+            run_id,
+            "info",
+            "analyze",
+            f"Analyzing {len(jobs):,} changed files with {workers} workers",
+            mode=mode,
+        )
         futures: dict[Future[tuple[dict[str, Any], str | None]], ProbeJob] = {
-            executor.submit(self._analyze_file, job.candidate, cancel_event, mode): job for job in jobs
+            executor.submit(
+                self._analyze_file,
+                job.candidate,
+                cancel_event,
+                mode,
+                lambda level, stage, message, run_id=run_id: scan_event_store.append(
+                    run_id, level, stage, message
+                ),
+            ): job
+            for job in jobs
         }
         pending = set(futures)
         try:
@@ -414,8 +494,21 @@ class ScanManager:
                             self._apply_technical(record, technical, error)
                         if error:
                             run.error_count += 1
+                            scan_event_store.append(
+                                run_id,
+                                "error",
+                                "analyze",
+                                f"Analysis warning for {job.filename}: {error}",
+                            )
                         else:
                             run.analyzed_count += 1
+                            source = technical.get("analysis_source") or "analyzer"
+                            scan_event_store.append(
+                                run_id,
+                                "success",
+                                "analyze",
+                                f"Analyzed {job.filename} with {source}",
+                            )
                         run.current_item = f"Analyzing · {completed:,}/{len(jobs):,} · {job.filename}"
                         if completed % settings.scan_commit_interval == 0:
                             db.commit()
@@ -442,6 +535,12 @@ class ScanManager:
             return
         workers = max(1, min(settings.poster_workers, len(jobs)))
         logger.info("Fetching %d posters with %d workers", len(jobs), workers)
+        scan_event_store.append(
+            run_id,
+            "info",
+            "poster",
+            f"Resolving {len(jobs):,} posters with {workers} workers",
+        )
 
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reelindex-poster")
         futures: dict[Future[PosterResult], PosterJob] = {
@@ -488,6 +587,19 @@ class ScanManager:
                                     metadata = {}
                                 metadata["tmdb_id"] = result.tmdb_id
                                 movie.metadata_json = json.dumps(metadata)
+                            scan_event_store.append(
+                                run_id,
+                                "success",
+                                "poster",
+                                f"Poster ready: {job.title}",
+                            )
+                        elif not result.found:
+                            scan_event_store.append(
+                                run_id,
+                                "debug",
+                                "poster",
+                                f"No poster found: {job.title}",
+                            )
                         run.current_item = f"Posters · {completed:,}/{len(jobs):,} · {job.title}"
                         if completed % settings.scan_commit_interval == 0:
                             db.commit()
@@ -666,10 +778,16 @@ class ScanManager:
         file_candidate: Any,
         cancel_event: threading.Event | None = None,
         mode: str = "quick",
+        event_callback: Any | None = None,
     ) -> tuple[dict[str, Any], str | None]:
+        def event(level: str, stage: str, message: str) -> None:
+            if event_callback:
+                event_callback(level, stage, message)
+
         if cancel_event and cancel_event.is_set():
             raise ProbeCancelled("media analysis cancelled")
         if ScanManager._has_server_technical(file_candidate.technical):
+            event("info", "analyze", f"Using media-server metadata: {file_candidate.filename}")
             technical = dict(file_candidate.technical)
             technical["analysis_source"] = "media-server"
             technical["analysis_mode"] = "deep"
@@ -677,6 +795,7 @@ class ScanManager:
         if not file_candidate.local_path:
             return {}, "Media file is not locally accessible and the server supplied no technical metadata"
 
+        event("info", "mediainfo", f"Reading headers: {file_candidate.filename}")
         quick, quick_error = analyze_media_quick(file_candidate.local_path, cancel_event)
         if quick:
             quick["analysis_source"] = "mediainfo"
@@ -689,6 +808,11 @@ class ScanManager:
         # rather than the first operation for every movie.
         should_fallback = mode == "deep" or not quick
         if should_fallback:
+            event(
+                "warning" if quick_error else "info",
+                "ffprobe",
+                f"Using ffprobe fallback: {file_candidate.filename}",
+            )
             probed, probe_error = probe_media(file_candidate.local_path, cancel_event)
             if probed:
                 if quick:

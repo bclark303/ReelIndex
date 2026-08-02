@@ -293,3 +293,36 @@ input { height: 44px; padding: 0 12px; width: 100%; }
 .warning-callout p { margin: 0; line-height: 1.55; }
 #maintenance-status { min-height: 46px; margin-top: 12px; }
 @media (max-width: 760px) { .maintenance-grid { grid-template-columns: 1fr; } }
+
+/* Live scan console */
+.live-scan-card { margin: 0 0 22px; overflow: hidden; border: 1px solid rgba(93, 116, 154, .42); border-radius: var(--radius); background: #0b0e14; box-shadow: 0 18px 55px rgba(0,0,0,.18); }
+.live-scan-header { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; padding: 18px 20px; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, rgba(36,45,61,.72), rgba(19,24,33,.55)); }
+.live-scan-header h2 { margin: 4px 0 2px; font-size: 20px; }
+.live-scan-header p { margin: 0; color: var(--muted); font-size: 12px; text-transform: capitalize; }
+.live-scan-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
+.live-scan-controls select { max-width: 360px; min-width: 230px; height: 34px; font-size: 11px; }
+.scan-autoscroll { display: inline-flex; align-items: center; gap: 7px; padding: 0 8px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.scan-autoscroll input { width: 15px; height: 15px; }
+.scan-console { min-height: 220px; max-height: 430px; overflow: auto; padding: 9px 0; background: #07090d; font-family: Consolas, "Cascadia Mono", "Courier New", monospace; font-size: 11px; line-height: 1.5; scrollbar-color: #384153 #11151d; }
+.scan-event { display: grid; grid-template-columns: 86px 82px minmax(0, 1fr); gap: 10px; padding: 3px 16px; border-left: 2px solid transparent; color: #c7ced9; }
+.scan-event:hover { background: rgba(255,255,255,.025); }
+.scan-event-time { color: #6f7a8b; font-variant-numeric: tabular-nums; }
+.scan-event-stage { overflow: hidden; color: #8da1bd; font-weight: 700; text-transform: uppercase; text-overflow: ellipsis; white-space: nowrap; }
+.scan-event-message { min-width: 0; overflow-wrap: anywhere; }
+.scan-event-details { display: block; color: #6f7a8b; }
+.scan-event.success { border-left-color: rgba(85,214,158,.55); }
+.scan-event.success .scan-event-message { color: #b9e9d4; }
+.scan-event.warning { border-left-color: rgba(233,185,73,.7); }
+.scan-event.warning .scan-event-message { color: #e8d29d; }
+.scan-event.error { border-left-color: rgba(255,107,117,.8); background: rgba(255,107,117,.035); }
+.scan-event.error .scan-event-message { color: #ffb8be; }
+.scan-event.debug { opacity: .72; }
+.scan-console-empty { display: grid; min-height: 200px; place-items: center; color: #667184; }
+.live-scan-footer { display: flex; justify-content: space-between; gap: 15px; padding: 9px 16px; border-top: 1px solid var(--line); color: #697586; background: #0d1118; font-size: 10px; }
+@media (max-width: 800px) {
+  .live-scan-header { flex-direction: column; }
+  .live-scan-controls { width: 100%; justify-content: flex-start; }
+  .live-scan-controls select { width: 100%; max-width: none; }
+  .scan-event { grid-template-columns: 72px 68px minmax(0, 1fr); gap: 7px; padding-inline: 9px; }
+  .live-scan-footer { flex-direction: column; gap: 3px; }
+}

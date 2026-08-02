@@ -1,8 +1,8 @@
-# ReelIndex Windows v1.2.0 Validation
+# ReelIndex Windows v1.2.1 Validation
 
 ## Scope
 
-Version 1.2.0 replaces the ffprobe-first filesystem pipeline with tiered media analysis:
+Version 1.2.1 replaces the ffprobe-first filesystem pipeline with tiered media analysis:
 
 1. Media-server technical metadata
 2. Local sidecar metadata and artwork
@@ -30,15 +30,15 @@ A headless Chromium render with mocked production API responses verified:
 - Sources page renders without JavaScript errors
 - **Quick scan** control is visible
 - **Deep scan** control is visible
-- Footer displays **ReelIndex 1.2.0**
-- Cache-busted v1.2.0 assets are referenced
+- Footer displays **ReelIndex 1.2.1**
+- Cache-busted v1.2.1 assets are referenced
 
-Screenshot: `reelindex-v1.2.0-scan-modes.png`
+Screenshot: `reelindex-v1.2.1-scan-modes.png`
 
 ## Packaging validation
 
 - Native installer compiled as a Windows x64 GUI executable
-- Embedded payload includes `mediainfo.py`, updated scanner/API/config, v1.2.0 UI, and runtime installer
+- Embedded payload includes `mediainfo.py`, updated scanner/API/config, v1.2.1 UI, and runtime installer
 - Runtime setup downloads MediaInfo CLI 26.05 and ffprobe
 - In-place updater preserves `%LOCALAPPDATA%\ReelIndex`
 - ZIP integrity checks passed
