@@ -30,7 +30,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  WINDOWS_PACKAGE_VERSION: 1.4.8.1
+  WINDOWS_PACKAGE_VERSION: 1.4.8.2
 
 jobs:
   build-scan:
