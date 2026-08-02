@@ -38,10 +38,29 @@ jobs:
             reelindex:smoke
       - name: Validate health, tools, and shared UI
         run: |
-          for attempt in {1..60}; do
-            if curl --fail --silent http://127.0.0.1:18080/api/health > health.json; then break; fi
+          rm -f health.json
+          healthy=false
+          for attempt in {1..75}; do
+            running="$(docker inspect --format '{{.State.Running}}' reelindex-smoke 2>/dev/null || true)"
+            if [[ "$running" != "true" ]]; then
+              echo "ReelIndex container exited before becoming healthy."
+              docker inspect reelindex-smoke || true
+              docker logs reelindex-smoke || true
+              exit 1
+            fi
+            if curl --fail --silent --show-error \
+              --output health.json http://127.0.0.1:18080/api/health; then
+              healthy=true
+              break
+            fi
             sleep 1
           done
+          if [[ "$healthy" != "true" ]] || [[ ! -s health.json ]]; then
+            echo "ReelIndex did not return a health payload."
+            docker inspect --format 'status={{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' reelindex-smoke || true
+            docker logs reelindex-smoke || true
+            exit 1
+          fi
           python - <<'PY'
           import json
           payload = json.load(open('health.json', encoding='utf-8'))
@@ -49,14 +68,16 @@ jobs:
           assert payload['version'] == '1.4.5', payload
           assert payload['edition'] == 'Docker / Unraid', payload
           PY
-          curl --fail --silent http://127.0.0.1:18080/ | grep -q 'ReelIndex 1.4.5'
+          curl --fail --silent --show-error http://127.0.0.1:18080/ | grep -q 'ReelIndex 1.4.5'
           docker exec reelindex-smoke ffprobe -version
           docker exec reelindex-smoke mediainfo --Version
           test -f "${RUNNER_TEMP}/reelindex-data/reelindex.db"
           test -f "${RUNNER_TEMP}/reelindex-data/.secret_key"
       - name: Show container logs on failure
         if: failure()
-        run: docker logs reelindex-smoke || true
+        run: |
+          docker inspect --format 'status={{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' reelindex-smoke || true
+          docker logs reelindex-smoke || true
       - name: Stop smoke container
         if: always()
         run: docker rm --force reelindex-smoke >/dev/null 2>&1 || true
