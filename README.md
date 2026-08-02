@@ -5,7 +5,7 @@ Docker, and Unraid**. It indexes movie libraries from local folders, mapped
 or mounted paths, UNC/SMB shares, Plex, Jellyfin, or Emby and presents
 searchable poster and table views with technical media details.
 
-The Windows and Docker/Unraid editions use the same v1.4.5 FastAPI backend and
+The Windows and Docker/Unraid editions use the same v1.4.6 FastAPI backend and
 browser interface.
 
 ![ReelIndex library](docs/images/library.png)
@@ -13,7 +13,7 @@ browser interface.
 ## Download for Windows
 
 Download the current installer from
-[`dist/ReelIndex-Windows-Setup-v1.4.5.exe`](dist/ReelIndex-Windows-Setup-v1.4.5.exe).
+[`dist/ReelIndex-Windows-Setup-v1.4.6.exe`](dist/ReelIndex-Windows-Setup-v1.4.6.exe).
 
 The installer is not digitally signed, so Windows SmartScreen may show an
 unknown-publisher warning. Verify it against [`dist/SHA256SUMS.txt`](dist/SHA256SUMS.txt)
@@ -34,7 +34,7 @@ the current Windows user.
 The published image is:
 
 ```text
-ghcr.io/bclark303/reelindex:1.4.5
+ghcr.io/bclark303/reelindex:1.4.6
 ```
 
 Start it with the included Compose file:
