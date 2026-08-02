@@ -4,3 +4,4 @@ b29a41acca974f03dd3d480d83de4c9ffcddac9907c55a89ff4732ff4d1897d9  ReelIndex-Dock
 9f837e04fcd8f01c17f4e2ec5622afe71044846aee7ca85a9902752ebbe659a1  ReelIndex-Unraid-Template-v1.4.5.xml
 4ae3c963bd47b25144b9b299116db1d86ba6554b8f19fa2bca8de0ae584f33a8  ReelIndex-Windows-Setup-v1.4.6.exe
 435556a5ce4c0a51f8d6463ecf0adc6015ccf6c11555330c2ab7daa5053f5774  ReelIndex-Windows-Setup-v1.4.7.exe
+3b3feeba169ca66a0d17682f1c7969c074e914d844f14c277227414986a2583f  ReelIndex-Windows-Setup-v1.4.8.exe
