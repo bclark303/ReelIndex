@@ -36,7 +36,7 @@ def _upgrade_library_identity() -> None:
     # cross-source duplicates before the API starts serving requests.
     from app.services.library_identity import upgrade_library_identity
 
-    with SessionLocal() as db:
+    with Session(bind=engine, autoflush=False, expire_on_commit=False) as db:
         upgrade_library_identity(db)
 
 

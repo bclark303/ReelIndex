@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.models import MediaFile, Movie, Source
+from app.models import MediaFile, Movie, MovieSource, Source
 from app.schemas.api import (
     PaginatedProbeFailures,
     ProbeFailureItem,
@@ -63,7 +63,15 @@ def _failure_item(file: MediaFile, movie: Movie, source: Source) -> ProbeFailure
 def _all_failure_rows(db: Session, source_id: str | None = None):
     conditions = [MediaFile.active.is_(True), Movie.active.is_(True), MediaFile.probe_error.is_not(None)]
     if source_id:
-        conditions.append(Movie.source_id == source_id)
+        conditions.append(
+            select(MovieSource.id)
+            .where(
+                MovieSource.movie_id == Movie.id,
+                MovieSource.source_id == source_id,
+                MovieSource.active.is_(True),
+            )
+            .exists()
+        )
     return db.execute(
         select(MediaFile, Movie, Source)
         .join(Movie, MediaFile.movie_id == Movie.id)

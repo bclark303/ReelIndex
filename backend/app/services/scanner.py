@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.security import reveal_config
-from app.models import MediaFile, Movie, ScanRun, Source
+from app.models import MediaFile, Movie, MovieSource, ScanRun, Source
 from app.services.deep_queue import deep_queue_store
 from app.services.library_identity import LibraryIdentityIndex, candidate_fingerprint
 from app.services.media_utils import sort_title
@@ -1530,7 +1530,16 @@ class ScanManager:
             movies = db.scalars(
                 select(Movie)
                 .options(selectinload(Movie.files))
-                .where(Movie.source_id == source_id, Movie.active.is_(True))
+                .where(
+                    Movie.active.is_(True),
+                    select(MovieSource.id)
+                    .where(
+                        MovieSource.movie_id == Movie.id,
+                        MovieSource.source_id == source_id,
+                        MovieSource.active.is_(True),
+                    )
+                    .exists(),
+                )
             ).all()
             changed = False
             for index, movie in enumerate(movies, start=1):
