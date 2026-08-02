@@ -1,0 +1,9 @@
+.env
+**/__pycache__/
+**/.pytest_cache/
+**/.coverage
+frontend/node_modules/
+frontend/dist/
+backend/*.egg-info/
+*.db
+.DS_Store

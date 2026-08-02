@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>ReelIndex</Name>
+  <Repository>reelindex:unraid</Repository>
+  <Registry/>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project/>
+  <Overview>ReelIndex is a read-only movie inventory application with poster and table views, title search, ffprobe technical metadata, incremental scans, Plex/Jellyfin/Emby adapters, scheduled rescans, and cached artwork.&#xD;&#xA;&#xD;&#xA;This local template expects the reelindex:unraid image to be built first using the included install-reelindex.sh script.</Overview>
+  <Category>MediaApp:Video Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams>--stop-timeout 30</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Build the local image before creating the container. Run unraid/install-reelindex.sh from the extracted project directory. Media paths must be mounted read-only. In ReelIndex, use the container path /media rather than the Unraid host path.</Requires>
+  <Config Name="WebUI Port" Target="8080" Default="8080" Mode="tcp" Description="Host port used to open the ReelIndex web interface." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Application Data" Target="/data" Default="/mnt/user/appdata/reelindex" Mode="rw" Description="SQLite database, encrypted source credentials, poster cache, and application state." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/reelindex</Config>
+  <Config Name="Movie Library" Target="/media" Default="/mnt/user/Movies" Mode="ro" Description="Primary movie library. This mapping is intentionally read-only. Configure filesystem sources in ReelIndex using /media." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/Movies</Config>
+  <Config Name="Timezone" Target="TZ" Default="America/Toronto" Mode="" Description="IANA timezone used by the container." Type="Variable" Display="always" Required="true" Mask="false">America/Toronto</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID used for writable application data. Unraid default is 99 (nobody)." Type="Variable" Display="advanced-hide" Required="true" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID used for application data and media reads. Unraid default is 100 (users)." Type="Variable" Display="advanced-hide" Required="true" Mask="false">100</Config>
+  <Config Name="UMASK" Target="UMASK" Default="002" Mode="" Description="File creation mask for ReelIndex data." Type="Variable" Display="advanced-hide" Required="true" Mask="false">002</Config>
+  <Config Name="Demo Mode" Target="REELINDEX_DEMO_MODE" Default="false" Mode="" Description="Set to true only to seed a synthetic demonstration library." Type="Variable" Display="always" Required="true" Mask="false">false</Config>
+  <Config Name="Log Level" Target="REELINDEX_LOG_LEVEL" Default="INFO" Mode="" Description="Python application logging level: DEBUG, INFO, WARNING, or ERROR." Type="Variable" Display="advanced-hide" Required="true" Mask="false">INFO</Config>
+  <Config Name="TMDB API Token" Target="REELINDEX_TMDB_API_TOKEN" Default="" Mode="" Description="Optional TMDB bearer token used as a poster and descriptive metadata fallback." Type="Variable" Display="advanced-hide" Required="false" Mask="true"/>
+  <Config Name="ffprobe Timeout" Target="REELINDEX_MAX_PROBE_SECONDS" Default="45" Mode="" Description="Maximum number of seconds allowed for each ffprobe operation." Type="Variable" Display="advanced-hide" Required="true" Mask="false">45</Config>
+  <Config Name="Allowed Extensions" Target="REELINDEX_ALLOWED_EXTENSIONS" Default=".mkv,.mp4,.m4v,.avi,.mov,.wmv,.ts,.m2ts,.webm,.mpg,.mpeg" Mode="" Description="Comma-separated video file extensions included in filesystem scans." Type="Variable" Display="advanced-hide" Required="true" Mask="false">.mkv,.mp4,.m4v,.avi,.mov,.wmv,.ts,.m2ts,.webm,.mpg,.mpeg</Config>
+  <TailscaleStateDir/>
+  <Changes>### 2026.07.30&#xD;&#xA;- Initial Unraid all-in-one image and local Docker template.&#xD;&#xA;- Read-only movie mapping and persistent appdata mapping.&#xD;&#xA;- Configurable PUID, PGID, timezone, TMDB token, logging, and ffprobe timeout.</Changes>
+</Container>

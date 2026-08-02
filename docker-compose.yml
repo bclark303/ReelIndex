@@ -1,0 +1,39 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: reelindex-backend
+    restart: unless-stopped
+    environment:
+      REELINDEX_DATA_DIR: /data
+      REELINDEX_DEMO_MODE: ${DEMO_MODE:-false}
+      REELINDEX_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REELINDEX_TMDB_API_TOKEN: ${TMDB_API_TOKEN:-}
+      REELINDEX_CORS_ORIGINS: http://localhost:${APP_PORT:-8080}
+    volumes:
+      - reelindex_data:/data
+      - type: bind
+        source: ${MEDIA_PATH:-./sample-media}
+        target: /media
+        read_only: true
+    networks:
+      - reelindex
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: reelindex-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    networks:
+      - reelindex
+
+volumes:
+  reelindex_data:
+
+networks:
+  reelindex:

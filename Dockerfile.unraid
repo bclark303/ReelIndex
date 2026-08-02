@@ -1,0 +1,43 @@
+FROM node:22-alpine AS frontend-build
+
+WORKDIR /build/frontend
+COPY frontend/package*.json ./
+RUN npm install --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
+
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    REELINDEX_DATA_DIR=/data \
+    REELINDEX_LOG_LEVEL=INFO \
+    REELINDEX_DEMO_MODE=false \
+    PUID=99 \
+    PGID=100 \
+    UMASK=002 \
+    TZ=Etc/UTC
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       bash curl ffmpeg gosu nginx tini tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY backend/requirements.txt ./requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
+COPY backend/app ./app
+COPY --from=frontend-build /build/frontend/dist /usr/share/nginx/html
+COPY unraid/nginx.conf /etc/nginx/nginx.conf
+COPY unraid/start-reelindex.sh /usr/local/bin/start-reelindex
+RUN chmod 0755 /usr/local/bin/start-reelindex \
+    && mkdir -p /data /tmp/nginx/client_temp /tmp/nginx/proxy_temp /tmp/nginx/fastcgi_temp /tmp/nginx/uwsgi_temp /tmp/nginx/scgi_temp
+
+EXPOSE 8080
+VOLUME ["/data"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8080/api/health || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/start-reelindex"]
