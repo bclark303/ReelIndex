@@ -188,8 +188,9 @@ class LibraryIdentityIndex:
         )
         # Provider IDs are strongest, followed by a physical-file match and then
         # normalized title/year or title/runtime.
-        ordered = sorted(keys, key=lambda key: (0 if key.startswith(("imdb:", "tmdb:")) else 2, key))
-        for key in ordered:
+        external_keys = sorted(key for key in keys if key.startswith(("imdb:", "tmdb:")))
+        fallback_keys = sorted(key for key in keys if key not in external_keys)
+        for key in external_keys:
             movie = self.movie_keys.get(key)
             if movie is not None:
                 return movie, None
@@ -198,7 +199,7 @@ class LibraryIdentityIndex:
                 media_file = self.file_keys.get(key)
                 if media_file is not None:
                     return media_file.movie, None
-        for key in ordered:
+        for key in fallback_keys:
             movie = self.movie_keys.get(key)
             if movie is not None:
                 return movie, None

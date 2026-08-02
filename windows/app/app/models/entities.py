@@ -114,7 +114,6 @@ class MovieSource(Base):
     __tablename__ = "movie_sources"
     __table_args__ = (
         UniqueConstraint("source_id", "source_movie_id", name="uq_movie_source_link_external"),
-        UniqueConstraint("source_id", "movie_id", name="uq_movie_source_link_movie"),
         Index("ix_movie_sources_active", "active"),
         Index("ix_movie_sources_movie", "movie_id"),
     )
@@ -138,7 +137,6 @@ class MediaFileSource(Base):
     __tablename__ = "media_file_sources"
     __table_args__ = (
         UniqueConstraint("source_id", "source_file_id", name="uq_file_source_link_external"),
-        UniqueConstraint("source_id", "media_file_id", name="uq_file_source_link_file"),
         Index("ix_media_file_sources_active", "active"),
         Index("ix_media_file_sources_file", "media_file_id"),
     )
