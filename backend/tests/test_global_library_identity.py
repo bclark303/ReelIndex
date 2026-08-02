@@ -9,7 +9,7 @@ from sqlalchemy.pool import NullPool
 
 from app.models import Base, MediaFile, MediaFileSource, Movie, MovieSource, ScanRun, Source
 from app.services import scanner as scanner_module
-from app.services.library_identity import upgrade_library_identity
+from app.services.library_identity import LibraryIdentityIndex, upgrade_library_identity
 from app.services.scanner import ScanManager
 from app.sources.base import FileCandidate, MovieCandidate
 
@@ -121,6 +121,126 @@ def test_two_source_scans_share_one_movie_and_file(tmp_path, monkeypatch):
     engine.dispose()
 
 
+
+
+def test_trusted_content_signature_matches_title_aliases(tmp_path):
+    engine, LocalSession = make_session(tmp_path)
+    with LocalSession() as db:
+        plex = Source(name="Plex", type="plex", url_or_path="http://plex")
+        filesystem = Source(name="Filesystem", type="filesystem", url_or_path="/media")
+        db.add_all([plex, filesystem])
+        db.flush()
+        movie = Movie(
+            source_id=plex.id,
+            source_movie_id="plex-wave",
+            title="The 5th Wave",
+            sort_title="5th wave",
+            year=2016,
+        )
+        db.add(movie)
+        db.flush()
+        db.add(
+            MediaFile(
+                movie_id=movie.id,
+                source_file_id="plex-part",
+                path="/server/movies/The 5th Wave (2016) Bluray-1080p.mkv",
+                filename="The 5th Wave (2016) Bluray-1080p.mkv",
+                size_bytes=8_765_432_100,
+            )
+        )
+        db.commit()
+        upgrade_library_identity(db)
+
+        candidate = MovieCandidate(
+            source_movie_id="filesystem-wave",
+            title="5th Wave, The",
+            year=2016,
+            files=[
+                FileCandidate(
+                    source_file_id="filesystem-file",
+                    path="/media/The 5th Wave (2016) Bluray-1080p.mkv",
+                    filename="The 5th Wave (2016) Bluray-1080p.mkv",
+                    size_bytes=8_765_432_100,
+                )
+            ],
+        )
+        matched, source_link = LibraryIdentityIndex(db).movie_for_candidate(filesystem.id, candidate)
+        assert matched is not None and matched.id == movie.id
+        assert source_link is None
+
+    engine.dispose()
+
+
+def test_startup_merges_exact_content_despite_title_aliases(tmp_path):
+    engine, LocalSession = make_session(tmp_path)
+    with LocalSession() as db:
+        plex = Source(name="Plex", type="plex", url_or_path="http://plex")
+        filesystem = Source(name="Filesystem", type="filesystem", url_or_path="/media")
+        db.add_all([plex, filesystem])
+        db.flush()
+        first = Movie(
+            source_id=plex.id,
+            source_movie_id="plex-angry-men",
+            title="12 Angry Men",
+            sort_title="12 angry men",
+            year=1957,
+        )
+        second = Movie(
+            source_id=filesystem.id,
+            source_movie_id="fs-angry-men",
+            title="12 Angry Men tt0050083",
+            sort_title="12 angry men tt0050083",
+            year=1957,
+        )
+        db.add_all([first, second])
+        db.flush()
+        filename = "12 Angry Men (1957) Bluray-1080p.mkv"
+        db.add_all([
+            MediaFile(
+                movie_id=first.id,
+                source_file_id="plex-file",
+                path=f"/server/movies/{filename}",
+                filename=filename,
+                size_bytes=9_000_000_000,
+            ),
+            MediaFile(
+                movie_id=second.id,
+                source_file_id="fs-file",
+                path=f"/media/{filename}",
+                filename=filename,
+                size_bytes=9_000_000_000,
+            ),
+        ])
+        db.commit()
+
+        assert upgrade_library_identity(db) == 1
+        assert db.scalar(select(func.count(Movie.id))) == 1
+        assert db.scalar(select(func.count(MediaFile.id))) == 1
+
+    engine.dispose()
+
+
+def test_generic_extra_signature_never_merges_movies(tmp_path):
+    engine, LocalSession = make_session(tmp_path)
+    with LocalSession() as db:
+        first_source = Source(name="One", type="filesystem", url_or_path="/one")
+        second_source = Source(name="Two", type="plex", url_or_path="http://plex")
+        db.add_all([first_source, second_source])
+        db.flush()
+        first = Movie(source_id=first_source.id, source_movie_id="one", title="Alpha", sort_title="alpha", year=2020)
+        second = Movie(source_id=second_source.id, source_movie_id="two", title="Beta", sort_title="beta", year=2020)
+        db.add_all([first, second])
+        db.flush()
+        db.add_all([
+            MediaFile(movie_id=first.id, source_file_id="one-file", path="/one/sample.avi", filename="sample.avi", size_bytes=500_000_000),
+            MediaFile(movie_id=second.id, source_file_id="two-file", path="/two/sample.avi", filename="sample.avi", size_bytes=500_000_000),
+        ])
+        db.commit()
+
+        assert upgrade_library_identity(db) == 0
+        assert db.scalar(select(func.count(Movie.id))) == 2
+
+    engine.dispose()
 
 def test_filename_and_size_alone_do_not_merge_different_movies(tmp_path):
     engine, LocalSession = make_session(tmp_path)
