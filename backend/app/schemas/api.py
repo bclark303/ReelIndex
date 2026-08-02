@@ -157,3 +157,26 @@ class DiagnosticsOut(BaseModel):
     sources: list[dict[str, Any]]
     recent_scans: list[dict[str, Any]]
     logging: dict[str, Any] = {}
+
+
+class PosterSearchResult(BaseModel):
+    tmdb_id: int
+    media_type: Literal["movie", "tv"]
+    title: str
+    original_title: str | None = None
+    year: int | None = None
+    overview: str | None = None
+    poster_path: str | None = None
+    poster_url: str | None = None
+    score: float | None = None
+
+
+class PosterSearchResponse(BaseModel):
+    query: str
+    year: int | None = None
+    results: list[PosterSearchResult] = Field(default_factory=list)
+
+
+class PosterSelection(BaseModel):
+    tmdb_id: int = Field(gt=0)
+    media_type: Literal["movie", "tv"] = "movie"

@@ -36,7 +36,9 @@
   function toast(message,type='success'){ const node=document.createElement('div'); node.className=`toast ${type}`; node.textContent=message; document.body.appendChild(node); setTimeout(()=>node.remove(),3500); }
   function showError(message){ globalError.innerHTML=message?`<div class="global-error">${icon('warning',16)}<span>${esc(message)}</span></div>`:''; }
   async function request(path,init={}){
-    const response=await fetch(API+path,{cache:'no-store',...init,headers:{'Content-Type':'application/json',...(init.headers||{})}});
+    const isForm=typeof FormData!=='undefined'&&init.body instanceof FormData;
+    const headers={...(isForm?{}:{'Content-Type':'application/json'}),...(init.headers||{})};
+    const response=await fetch(API+path,{cache:'no-store',...init,headers});
     if(!response.ok){ let payload={}; try{payload=await response.json();}catch{} throw new Error(payload.detail||response.statusText||'Request failed'); }
     return response.status===204?null:response.json();
   }
@@ -46,7 +48,11 @@
     scans:()=>request('/scans'), startScan:(id,mode='quick',scope='incomplete')=>request('/scans/'+id+'?mode='+encodeURIComponent(mode)+'&scope='+encodeURIComponent(scope),{method:'POST'}), resumeScan:id=>request('/scans/'+id+'/resume',{method:'POST'}), cancelScan:id=>request('/scans/'+id+'/cancel',{method:'POST'}), scanEvents:(id,cursor=0,tail=false)=>request(`/scans/${id}/events?cursor=${cursor}&limit=400&tail=${tail?'true':'false'}`), diagnostics:()=>request('/diagnostics'),
     loggingSettings:p=>request('/settings/logging',{method:'PUT',body:JSON.stringify(p)}),
     clearInventory:confirmation=>request('/maintenance/clear-inventory',{method:'POST',body:JSON.stringify({confirmation})}),
-    factoryReset:confirmation=>request('/maintenance/factory-reset',{method:'POST',body:JSON.stringify({confirmation})})
+    factoryReset:confirmation=>request('/maintenance/factory-reset',{method:'POST',body:JSON.stringify({confirmation})}),
+    posterSearch:(id,q,year,includeTv=true)=>{const p=new URLSearchParams({q,include_tv:String(includeTv),limit:'24'});if(year)p.set('year',String(year));return request(`/movies/${encodeURIComponent(id)}/poster/search?${p}`)},
+    selectPoster:(id,tmdbId,mediaType)=>request(`/movies/${encodeURIComponent(id)}/poster/tmdb`,{method:'POST',body:JSON.stringify({tmdb_id:tmdbId,media_type:mediaType})}),
+    uploadPoster:(id,file)=>{const form=new FormData();form.append('poster',file);return request(`/movies/${encodeURIComponent(id)}/poster/upload`,{method:'POST',body:form})},
+    clearPoster:id=>request(`/movies/${encodeURIComponent(id)}/poster`,{method:'DELETE'})
   };
   function loading(label='Loading'){ return `<div class="loading"><span class="spinner"></span><span>${esc(label)}</span></div>`; }
   function empty(title,message,action=''){ return `<div class="empty-state">${icon('film',42)}<h2>${esc(title)}</h2><p>${esc(message)}</p>${action}</div>`; }
@@ -108,7 +114,67 @@
     document.getElementById('go-sources')?.addEventListener('click',()=>setPage('sources'));
     document.getElementById('prev-page')?.addEventListener('click',()=>{state.query.page=Math.max(1,(state.query.page||1)-1);loadLibrary();scrollTo(0,0);});document.getElementById('next-page')?.addEventListener('click',()=>{state.query.page=(state.query.page||1)+1;loadLibrary();scrollTo(0,0);});
   }
-  async function openMovie(id){overlay.innerHTML=`<div class="drawer-backdrop"><aside class="detail-drawer"><button class="icon-button drawer-close" data-close>${icon('x')}</button>${loading('Loading movie details')}</aside></div>`;overlay.querySelector('[data-close]').onclick=()=>overlay.innerHTML='';overlay.querySelector('.drawer-backdrop').addEventListener('click',e=>{if(e.target.classList.contains('drawer-backdrop'))overlay.innerHTML='';});try{const m=await api.movie(id);overlay.querySelector('.detail-drawer').innerHTML=`<button class="icon-button drawer-close" data-close>${icon('x')}</button><div class="detail-hero">${m.poster_url?`<img class="detail-poster" src="${m.poster_url}" alt="${esc(m.title)} poster"/>`:`<div class="detail-poster">${placeholder(m.title)}</div>`}<div class="detail-heading"><span class="eyebrow">${esc(m.source_name)}</span><h1>${esc(m.title)}</h1><div class="detail-heading-meta"><span>${m.year||'Unknown year'}</span><span>${fmtRuntime(m.runtime_seconds)}</span><span>${m.file_count} file${m.file_count===1?'':'s'}</span></div><div class="badge-list">${badges(m.resolutions,true)}${badges(m.video_codecs)}${badges(m.containers)}</div></div></div>${m.overview?`<p class="overview">${esc(m.overview)}</p>`:''}<div class="detail-summary-grid"><div class="detail-item"><span>Total size</span><strong>${fmtBytes(m.total_size_bytes)}</strong></div><div class="detail-item"><span>Source</span><strong>${esc(m.source_type)}</strong></div><div class="detail-item"><span>Files</span><strong>${m.file_count}</strong></div><div class="detail-item"><span>Updated</span><strong>${fmtDate(m.updated_at)}</strong></div></div><section class="detail-section"><div class="section-heading"><div><span class="eyebrow">Technical inventory</span><h2>Media files</h2></div>${icon('database')}</div><div class="file-stack">${m.files.map((f,i)=>fileCard(f,i)).join('')}</div></section>`;overlay.querySelector('[data-close]').onclick=()=>overlay.innerHTML='';}catch(e){overlay.querySelector('.detail-drawer').innerHTML=`<button class="icon-button drawer-close" data-close>${icon('x')}</button><div class="error-panel">${icon('warning')}<p>${esc(e.message)}</p></div>`;overlay.querySelector('[data-close]').onclick=()=>overlay.innerHTML='';}}
+  async function openMovie(id){
+    state.selectedMovie=id;
+    overlay.innerHTML=`<div class="drawer-backdrop"><aside class="detail-drawer"><button class="icon-button drawer-close" data-close>${icon('x')}</button>${loading('Loading movie details')}</aside></div>`;
+    overlay.querySelector('[data-close]').onclick=()=>overlay.innerHTML='';
+    overlay.querySelector('.drawer-backdrop').addEventListener('click',e=>{if(e.target.classList.contains('drawer-backdrop'))overlay.innerHTML='';});
+    try{
+      const m=await api.movie(id);
+      state.selectedMovie=m;
+      const posterSource=m.metadata&&m.metadata.poster_source?String(m.metadata.poster_source).replaceAll('-',' '):'';
+      overlay.querySelector('.detail-drawer').innerHTML=`<button class="icon-button drawer-close" data-close>${icon('x')}</button><div class="detail-hero"><div class="detail-poster-wrap">${m.poster_url?`<img class="detail-poster" src="${m.poster_url}" alt="${esc(m.title)} poster"/>`:`<div class="detail-poster">${placeholder(m.title)}</div>`}<button class="button secondary small poster-manage" id="manage-poster">${icon('edit',15)}Manage poster</button>${posterSource?`<span class="poster-source-label">${esc(posterSource)}</span>`:''}</div><div class="detail-heading"><span class="eyebrow">${esc(m.source_name)}</span><h1>${esc(m.title)}</h1><div class="detail-heading-meta"><span>${m.year||'Unknown year'}</span><span>${fmtRuntime(m.runtime_seconds)}</span><span>${m.file_count} file${m.file_count===1?'':'s'}</span></div><div class="badge-list">${badges(m.resolutions,true)}${badges(m.video_codecs)}${badges(m.containers)}</div></div></div>${m.overview?`<p class="overview">${esc(m.overview)}</p>`:''}<div class="detail-summary-grid"><div class="detail-item"><span>Total size</span><strong>${fmtBytes(m.total_size_bytes)}</strong></div><div class="detail-item"><span>Source</span><strong>${esc(m.source_type)}</strong></div><div class="detail-item"><span>Files</span><strong>${m.file_count}</strong></div><div class="detail-item"><span>Updated</span><strong>${fmtDate(m.updated_at)}</strong></div></div><section class="detail-section"><div class="section-heading"><div><span class="eyebrow">Technical inventory</span><h2>Media files</h2></div>${icon('database')}</div><div class="file-stack">${m.files.map((f,i)=>fileCard(f,i)).join('')}</div></section>`;
+      overlay.querySelector('[data-close]').onclick=()=>overlay.innerHTML='';
+      overlay.querySelector('#manage-poster').onclick=()=>openPosterManager(m);
+    }catch(e){
+      overlay.querySelector('.detail-drawer').innerHTML=`<button class="icon-button drawer-close" data-close>${icon('x')}</button><div class="error-panel">${icon('warning')}<p>${esc(e.message)}</p></div>`;
+      overlay.querySelector('[data-close]').onclick=()=>overlay.innerHTML='';
+    }
+  }
+
+  function posterResultCard(result,movie){
+    const titleMeta=[result.year,result.media_type==='tv'?'TV':'Movie'].filter(Boolean).join(' · ');
+    return `<article class="poster-result-card">${result.poster_url?`<img src="${result.poster_url}" alt="${esc(result.title)} poster" loading="lazy"/>`:`<div class="poster-result-empty">${placeholder(result.title,true)}</div>`}<div class="poster-result-copy"><strong>${esc(result.title)}</strong><span>${esc(titleMeta||'TMDB')}</span>${result.original_title?`<small>${esc(result.original_title)}</small>`:''}<p>${esc((result.overview||'No description available.').slice(0,180))}</p></div><button class="button primary small" data-use-poster="${result.tmdb_id}" data-media-type="${esc(result.media_type)}" ${result.poster_url?'':'disabled'}>${result.poster_url?'Use poster':'No poster'}</button></article>`;
+  }
+
+  async function openPosterManager(movie,results=null,status=''){
+    const defaultQuery=(movie.metadata&&movie.metadata.imdb_id)||movie.title;
+    overlay.innerHTML=`<div class="modal-backdrop"><div class="source-modal poster-manager-modal"><div class="modal-header"><div><span class="eyebrow">Poster management</span><h2>${esc(movie.title)}</h2></div><button class="icon-button" data-close>${icon('x')}</button></div><div class="poster-manager-current">${movie.poster_url?`<img src="${movie.poster_url}" alt="Current poster"/>`:`<div class="poster-current-empty">${placeholder(movie.title,true)}</div>`}<div><strong>${movie.poster_url?'Current poster':'No poster selected'}</strong><p>Search TMDB by title or IMDb ID, or upload a JPEG, PNG, or WebP image. Manual choices are kept during future scans.</p>${movie.poster_url?`<button class="button danger small" id="remove-poster">Remove current poster</button>`:''}</div></div><form id="poster-search-form" class="poster-search-form"><label><span>Title or IMDb ID</span><input id="poster-query" value="${esc(defaultQuery)}" placeholder="Movie title or tt1234567"/></label><label class="poster-year-field"><span>Year</span><input id="poster-year" type="number" min="1870" max="2200" value="${movie.year||''}"/></label><label class="check-row poster-tv-check"><input id="poster-include-tv" type="checkbox" checked/><span>Include TV results</span></label><button class="button primary" type="submit">${icon('search',16)}Search</button></form><div id="poster-manager-status">${status?`<div class="connection-status ${status.startsWith('Error:')?'error':'success'}">${esc(status)}</div>`:''}</div><div id="poster-results">${results===null?'<div class="poster-search-hint">Search using the cleaned title, alternate title, IMDb ID, or a simpler phrase.</div>':results.length?`<div class="poster-result-grid">${results.map(r=>posterResultCard(r,movie)).join('')}</div>`:`<div class="poster-search-hint">No matching posters were returned. Try a shorter title, remove release tags, include the year, or upload an image.</div>`}</div><div class="poster-upload-box"><div><strong>Upload your own poster</strong><p>The image is stored only in ReelIndex's local cache; media files remain read-only.</p></div><input id="poster-file" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"/><button class="button secondary" id="upload-poster" type="button">${icon('plus',16)}Upload image</button></div><div class="modal-actions"><button class="button ghost" id="back-to-movie" type="button">Back to movie</button></div></div></div>`;
+    overlay.querySelector('[data-close]').onclick=()=>overlay.innerHTML='';
+    overlay.querySelector('#back-to-movie').onclick=()=>openMovie(movie.id);
+    const form=overlay.querySelector('#poster-search-form');
+    form.onsubmit=async e=>{
+      e.preventDefault();
+      const host=overlay.querySelector('#poster-results');
+      const statusHost=overlay.querySelector('#poster-manager-status');
+      const query=overlay.querySelector('#poster-query').value.trim();
+      const year=Number(overlay.querySelector('#poster-year').value)||null;
+      if(!query){statusHost.innerHTML='<div class="connection-status error">Enter a title or IMDb ID.</div>';return;}
+      host.innerHTML=loading('Searching TMDB');statusHost.innerHTML='';
+      try{
+        const payload=await api.posterSearch(movie.id,query,year,overlay.querySelector('#poster-include-tv').checked);
+        openPosterManager(movie,payload.results,`${payload.results.length} result${payload.results.length===1?'':'s'} for “${payload.query}”`);
+      }catch(err){openPosterManager(movie,[],`Error: ${err.message}`);}
+    };
+    overlay.querySelectorAll('[data-use-poster]').forEach(button=>button.onclick=async()=>{
+      button.disabled=true;button.textContent='Applying…';
+      try{await api.selectPoster(movie.id,Number(button.dataset.usePoster),button.dataset.mediaType);toast('Poster updated');await loadLibrary();openMovie(movie.id);}catch(err){toast(err.message,'error');button.disabled=false;button.textContent='Use poster';}
+    });
+    const upload=overlay.querySelector('#upload-poster');
+    upload.onclick=async()=>{
+      const file=overlay.querySelector('#poster-file').files[0];
+      if(!file){toast('Choose an image first','error');return;}
+      upload.disabled=true;upload.textContent='Uploading…';
+      try{await api.uploadPoster(movie.id,file);toast('Poster uploaded');await loadLibrary();openMovie(movie.id);}catch(err){toast(err.message,'error');upload.disabled=false;upload.textContent='Upload image';}
+    };
+    const remove=overlay.querySelector('#remove-poster');
+    if(remove)remove.onclick=async()=>{
+      if(!confirm('Remove this cached poster? The movie file and any sidecar artwork will not be changed.'))return;
+      remove.disabled=true;
+      try{await api.clearPoster(movie.id);toast('Poster removed');await loadLibrary();openMovie(movie.id);}catch(err){toast(err.message,'error');remove.disabled=false;}
+    };
+  }
+
   function fileCard(f,i){return `<article class="file-card"><div class="file-card-header"><div><span class="file-index">File ${i+1}${f.edition?` · ${esc(f.edition)}`:''}</span><h3>${esc(f.filename)}</h3><p>${fmtBytes(f.size_bytes)} · ${fmtRuntime(f.duration_seconds)}</p></div><div class="badge-list">${f.resolution_label?`<span class="badge badge-solid">${esc(f.resolution_label)}</span>`:''}${f.container?`<span class="badge">${esc(f.container)}</span>`:''}</div></div>${f.probe_error?`<div class="inline-warning">${icon('warning',16)}<span>${esc(f.probe_error)}</span></div>`:''}<div class="technical-grid">${[['Video codec',f.video_codec],['Dimensions',f.width&&f.height?`${f.width}×${f.height}`:null],['Video bitrate',fmtBitrate(f.video_bitrate)],['Audio codec',f.audio_codec],['Audio channels',f.audio_channels],['Audio language',f.audio_languages],['Container',f.container],['Runtime',fmtRuntime(f.duration_seconds)]].map(([k,v])=>`<div class="detail-item"><span>${k}</span><strong>${esc(v||'—')}</strong></div>`).join('')}</div><div class="path-box">${icon('folder',15)}<code>${esc(f.path)}</code></div><details class="raw-details"><summary>Raw analyzer information</summary><pre>${esc(JSON.stringify(f.probe,null,2))}</pre></details></article>`;}
 
   function preferredLiveRun(){

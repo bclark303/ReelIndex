@@ -481,12 +481,29 @@ class ScanManager:
                 movie.year = candidate.year
                 movie.runtime_seconds = candidate.runtime_seconds
                 movie.overview = candidate.overview
-                movie.metadata_json = json.dumps(candidate.metadata, default=str)
+                try:
+                    existing_metadata = json.loads(movie.metadata_json or "{}")
+                except json.JSONDecodeError:
+                    existing_metadata = {}
+                merged_metadata = dict(candidate.metadata or {})
+                # Poster selections are application-owned data. A subsequent read-only
+                # inventory scan must not forget or overwrite a user's manual choice.
+                for key in (
+                    "tmdb_id", "imdb_id", "tmdb_media_type", "poster_source",
+                    "poster_match", "poster_locked", "poster_selected_title",
+                    "poster_upload_name",
+                ):
+                    if key in existing_metadata:
+                        merged_metadata[key] = existing_metadata[key]
+                movie.metadata_json = json.dumps(merged_metadata, default=str)
                 movie.active = True
 
                 destination = settings.data_dir / "posters" / source_id / f"{movie.id}.jpg"
+                manual_poster = bool(merged_metadata.get("poster_locked"))
                 local_poster = candidate.metadata.get("origin") == "filesystem" and bool(candidate.poster_ref)
-                if local_poster:
+                if manual_poster and destination.exists() and destination.stat().st_size > 100:
+                    movie.poster_path = str(destination)
+                elif local_poster:
                     # A local sidecar is authoritative. Quick scans refresh it, while
                     # technical-only deep scans reuse a healthy cached copy instead of
                     # recopying every poster over SMB.

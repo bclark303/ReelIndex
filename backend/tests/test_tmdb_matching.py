@@ -4,7 +4,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.services.scanner import ScanManager
-from app.services.tmdb import TmdbClient, clean_tmdb_search_title, extract_imdb_id
+from app.services.tmdb import (
+    TmdbClient, clean_release_title, clean_tmdb_search_title,
+    extract_imdb_id, generate_search_titles,
+)
 from app.sources.base import FileCandidate, MovieCandidate
 
 
@@ -119,3 +122,49 @@ def test_poster_fetch_extracts_imdb_id_from_filename(monkeypatch, tmp_path: Path
     assert result.match_method == "imdb"
     assert captured["imdb_id"] == "tt0078748"
     assert destination.read_bytes() == b"poster-data"
+
+
+def test_cleans_release_noise_and_disc_markers():
+    assert clean_release_title("Alien Covenant cd2") == "Alien Covenant"
+    assert clean_release_title("Green Lantern DVDRip XviD-MAXSPEED") == "Green Lantern"
+    assert clean_release_title("Star Trek 02 Wrath Of Khan 1280x528") == "Star Trek 02 Wrath Of Khan"
+    assert clean_release_title("Quest, The") == "The Quest"
+
+
+def test_generates_franchise_and_cleaned_search_variants():
+    variants = generate_search_titles("Star Trek 02 Wrath Of Khan 1280x528")
+    assert "Star Trek 02 Wrath Of Khan" in variants
+    assert "Star Trek Wrath Of Khan" in variants
+    assert generate_search_titles("Johnny English Strikes Again cd2")[-1] == "Johnny English Strikes Again"
+
+
+def test_tmdb_retries_with_release_cleaned_title(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        params = kwargs.get("params") or {}
+        calls.append((url, params))
+        if params.get("query") == "Cloud Atlas":
+            return _Response({"results": [{"id": 83542, "title": "Cloud Atlas", "poster_path": "/cloud.jpg"}]})
+        return _Response({"results": []})
+
+    monkeypatch.setattr("app.services.tmdb.httpx.get", fake_get)
+    result = TmdbClient("token").find_movie("Cloud Atlas READNFO BRRip")
+
+    assert result["id"] == 83542
+    assert result["_reelindex_query"] == "Cloud Atlas"
+    assert any(params.get("query") == "Cloud Atlas" for _, params in calls)
+
+
+def test_manual_catalog_search_includes_tv_and_ranks_posters(monkeypatch):
+    def fake_get(url, **kwargs):
+        if url.endswith("/search/movie"):
+            return _Response({"results": [{"id": 1, "title": "Shameless", "release_date": "2012-01-01", "poster_path": "/movie.jpg"}]})
+        if url.endswith("/search/tv"):
+            return _Response({"results": [{"id": 2, "name": "Shameless", "first_air_date": "2011-01-01", "poster_path": "/tv.jpg"}]})
+        raise AssertionError(url)
+
+    monkeypatch.setattr("app.services.tmdb.httpx.get", fake_get)
+    results = TmdbClient("token").search_catalog("Shameless", include_tv=True)
+
+    assert {(item["id"], item["_reelindex_media_type"]) for item in results} == {(1, "movie"), (2, "tv")}

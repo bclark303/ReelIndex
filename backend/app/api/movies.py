@@ -1,20 +1,36 @@
 from __future__ import annotations
 
 import json
+import os
+import uuid
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.core.database import get_db
+from app.core.security import reveal_config
 from app.models import MediaFile, Movie, Source
-from app.schemas.api import DashboardStats, MediaFileOut, MovieDetail, MovieListItem, PaginatedMovies
+from app.schemas.api import (
+    DashboardStats, MediaFileOut, MovieDetail, MovieListItem, PaginatedMovies,
+    PosterSearchResponse, PosterSearchResult, PosterSelection,
+)
+
+from app.services.tmdb import TmdbClient, clean_release_title
 
 router = APIRouter(tags=["movies"])
 
 
 def _poster_url(movie: Movie) -> str | None:
-    return f"/api/posters/{movie.id}" if movie.poster_path else None
+    if not movie.poster_path:
+        return None
+    try:
+        revision = int(movie.updated_at.timestamp())
+    except Exception:
+        revision = 0
+    return f"/api/posters/{movie.id}?v={revision}"
 
 
 def _list_item(movie: Movie, source: Source) -> MovieListItem:
@@ -172,6 +188,185 @@ def get_movie(movie_id: str, db: Session = Depends(get_db)):
     except json.JSONDecodeError:
         metadata = {}
     return MovieDetail(**item.model_dump(), metadata=metadata, files=files)
+
+
+def _movie_metadata(movie: Movie) -> dict:
+    try:
+        payload = json.loads(movie.metadata_json or "{}")
+        return payload if isinstance(payload, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _tmdb_for_movie(movie: Movie) -> TmdbClient:
+    source = movie.source
+    try:
+        config = reveal_config(json.loads(source.config_json or "{}")) if source else {}
+    except json.JSONDecodeError:
+        config = {}
+    token = config.get("tmdb_token") or settings.tmdb_api_token
+    if not token:
+        raise HTTPException(status_code=409, detail="TMDB is not configured for this source")
+    return TmdbClient(token)
+
+
+def _poster_destination(movie: Movie) -> Path:
+    return settings.data_dir / "posters" / movie.source_id / f"{movie.id}.jpg"
+
+
+def _write_manual_poster(movie: Movie, data: bytes, source: str, metadata_update: dict | None = None) -> None:
+    destination = _poster_destination(movie)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}-{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(data)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    movie.poster_path = str(destination)
+    metadata = _movie_metadata(movie)
+    metadata.update(metadata_update or {})
+    metadata["poster_source"] = source
+    metadata["poster_match"] = "manual"
+    metadata["poster_locked"] = True
+    movie.metadata_json = json.dumps(metadata, default=str)
+
+
+@router.get("/movies/{movie_id}/poster/search", response_model=PosterSearchResponse)
+def search_movie_posters(
+    movie_id: str,
+    q: str | None = None,
+    year: int | None = Query(default=None, ge=1870, le=2200),
+    include_tv: bool = True,
+    limit: int = Query(default=18, ge=1, le=40),
+    db: Session = Depends(get_db),
+):
+    movie = db.scalar(select(Movie).options(selectinload(Movie.source)).where(Movie.id == movie_id))
+    if not movie or not movie.active:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    query = (q or clean_release_title(movie.title)).strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="Enter a title, IMDb ID, or TMDB ID")
+    client = _tmdb_for_movie(movie)
+    results = client.search_catalog(query, year if year is not None else movie.year, include_tv=include_tv, limit=limit)
+    items: list[PosterSearchResult] = []
+    for result in results:
+        media_type = str(result.get("_reelindex_media_type") or "movie")
+        title = result.get("title") or result.get("name") or "Untitled"
+        original = result.get("original_title") or result.get("original_name")
+        release = result.get("release_date") or result.get("first_air_date")
+        result_year = None
+        if release:
+            try:
+                result_year = int(str(release)[:4])
+            except ValueError:
+                pass
+        poster_path = result.get("poster_path")
+        items.append(
+            PosterSearchResult(
+                tmdb_id=int(result["id"]),
+                media_type="tv" if media_type == "tv" else "movie",
+                title=str(title),
+                original_title=str(original) if original and original != title else None,
+                year=result_year,
+                overview=result.get("overview"),
+                poster_path=poster_path,
+                poster_url=f"https://image.tmdb.org/t/p/w342{poster_path}" if poster_path else None,
+                score=round(float(result.get("_reelindex_score") or 0), 4),
+            )
+        )
+    return PosterSearchResponse(query=query, year=year if year is not None else movie.year, results=items)
+
+
+@router.post("/movies/{movie_id}/poster/tmdb")
+def select_tmdb_poster(movie_id: str, payload: PosterSelection, db: Session = Depends(get_db)):
+    movie = db.scalar(select(Movie).options(selectinload(Movie.source)).where(Movie.id == movie_id))
+    if not movie or not movie.active:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    client = _tmdb_for_movie(movie)
+    result = client.get_title(payload.tmdb_id, payload.media_type)
+    if not result:
+        raise HTTPException(status_code=404, detail="TMDB title not found")
+    poster_path = result.get("poster_path")
+    if not poster_path:
+        raise HTTPException(status_code=422, detail="The selected TMDB title has no poster")
+    destination = _poster_destination(movie)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{movie.id}-{uuid.uuid4().hex}.download")
+    try:
+        if not client.download_poster(poster_path, temporary):
+            raise HTTPException(status_code=502, detail="Could not download the selected poster")
+        data = temporary.read_bytes()
+    finally:
+        temporary.unlink(missing_ok=True)
+    title = result.get("title") or result.get("name")
+    _write_manual_poster(
+        movie,
+        data,
+        "manual-tmdb",
+        {
+            "tmdb_id": int(payload.tmdb_id),
+            "tmdb_media_type": payload.media_type,
+            "poster_selected_title": title,
+        },
+    )
+    if not movie.overview and result.get("overview"):
+        movie.overview = result.get("overview")
+    db.commit()
+    return {"ok": True, "poster_url": _poster_url(movie), "title": title}
+
+
+@router.post("/movies/{movie_id}/poster/upload")
+async def upload_movie_poster(
+    movie_id: str,
+    poster: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    movie = db.get(Movie, movie_id)
+    if not movie or not movie.active:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    data = await poster.read(10 * 1024 * 1024 + 1)
+    if not data:
+        raise HTTPException(status_code=422, detail="The selected image is empty")
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Poster uploads are limited to 10 MB")
+    is_jpeg = data.startswith(b"\xff\xd8\xff")
+    is_png = data.startswith(b"\x89PNG\r\n\x1a\n")
+    is_webp = len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP"
+    if not (is_jpeg or is_png or is_webp):
+        raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP image")
+    _write_manual_poster(
+        movie,
+        data,
+        "manual-upload",
+        {"poster_upload_name": Path(poster.filename or "poster").name[:250]},
+    )
+    db.commit()
+    return {"ok": True, "poster_url": _poster_url(movie)}
+
+
+@router.delete("/movies/{movie_id}/poster", status_code=204)
+def clear_movie_poster(movie_id: str, db: Session = Depends(get_db)):
+    movie = db.get(Movie, movie_id)
+    if not movie or not movie.active:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    paths = {Path(movie.poster_path)} if movie.poster_path else set()
+    paths.add(_poster_destination(movie))
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    movie.poster_path = None
+    metadata = _movie_metadata(movie)
+    for key in (
+        "poster_source", "poster_match", "poster_locked", "poster_selected_title",
+        "poster_upload_name", "tmdb_media_type",
+    ):
+        metadata.pop(key, None)
+    movie.metadata_json = json.dumps(metadata, default=str)
+    db.commit()
+    return None
 
 
 @router.get("/stats", response_model=DashboardStats)
