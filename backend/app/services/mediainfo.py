@@ -196,6 +196,8 @@ def analyze_media_quick(
         settings.mediainfo_path,
         "--Output=JSON",
         "--Language=raw",
+        "--ParseSpeed=0",
+        "--File_TestContinuousFileNames=0",
         str(path),
     ]
     try:

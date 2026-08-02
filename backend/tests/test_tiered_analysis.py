@@ -87,3 +87,38 @@ def test_quick_cache_is_reused_but_deep_scan_upgrades_it():
     assert not ScanManager._cached_analysis_satisfies(quick_payload, "deep")
     assert ScanManager._cached_analysis_satisfies(deep_payload, "deep")
     assert ScanManager._cached_analysis_satisfies(legacy_ffprobe_payload, "deep")
+
+
+def test_quick_scan_never_runs_ffprobe_when_mediainfo_fails(monkeypatch):
+    monkeypatch.setattr(scanner_module, "analyze_media_quick", lambda *_: ({}, "MediaInfo timed out after 8 seconds"))
+
+    def forbidden_probe(*_args, **_kwargs):
+        raise AssertionError("ffprobe must not run during Quick scan fallback")
+
+    monkeypatch.setattr(scanner_module, "probe_media", forbidden_probe)
+    result, error = ScanManager._analyze_file(candidate(), mode="quick")
+
+    assert error is None
+    assert result["analysis_source"] == "filesystem-fallback"
+    assert result["analysis_mode"] == "quick"
+    assert result["container"] == "matroska"
+    assert "timed out" in result["analysis_warning"]
+
+
+def test_mediainfo_circuit_breaker_skips_later_quick_jobs(monkeypatch):
+    calls = {"count": 0}
+
+    def timeout(*_args, **_kwargs):
+        calls["count"] += 1
+        return {}, "MediaInfo timed out after 8 seconds"
+
+    monkeypatch.setattr(scanner_module, "analyze_media_quick", timeout)
+    circuit = scanner_module.AnalyzerCircuitBreaker("MediaInfo", threshold=2)
+
+    ScanManager._analyze_file(candidate(), mode="quick", mediainfo_circuit=circuit)
+    ScanManager._analyze_file(candidate(), mode="quick", mediainfo_circuit=circuit)
+    result, error = ScanManager._analyze_file(candidate(), mode="quick", mediainfo_circuit=circuit)
+
+    assert calls["count"] == 2
+    assert error is None
+    assert result["analysis_source"] == "filesystem-fallback"

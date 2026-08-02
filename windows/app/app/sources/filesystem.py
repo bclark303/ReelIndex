@@ -14,6 +14,11 @@ from app.sources.base import AdapterConnectionResult, DiscoveryCallback, FileCan
 
 
 _IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
+_AUXILIARY_FOLDER_NAMES = {"extras", "extra", "trailers", "trailer", "featurettes", "samples", "sample"}
+_AUXILIARY_MEDIA_PATTERN = re.compile(
+    r"(?:^|[._\-\s])(trailer|sample|featurette|deleted[._\-\s]*scenes?|behind[._\-\s]*the[._\-\s]*scenes?|interview|extras?)(?:$|[._\-\s])",
+    re.IGNORECASE,
+)
 
 
 class FilesystemAdapter:
@@ -85,6 +90,15 @@ class FilesystemAdapter:
             if not media_entries:
                 continue
 
+            # Trailers, samples, and bonus clips are not movie editions. When a
+            # folder (or a flat library root) contains at least one primary movie
+            # file, exclude auxiliary clips before counting or technical analysis.
+            if Path(directory).name.lower() in _AUXILIARY_FOLDER_NAMES:
+                continue
+            primary_entries = [entry for entry in media_entries if not self._is_auxiliary_media(entry.name)]
+            if primary_entries:
+                media_entries = primary_entries
+
             folder_is_movie = len(media_entries) <= 3
             folder_name = Path(directory).name
             stems = [Path(entry.name).stem for entry in media_entries]
@@ -151,6 +165,10 @@ class FilesystemAdapter:
                     progress(len(grouped), discovered_files, directory)
 
         return sorted(grouped.values(), key=lambda movie: (movie.title.lower(), movie.year or 0))
+
+    @staticmethod
+    def _is_auxiliary_media(filename: str) -> bool:
+        return bool(_AUXILIARY_MEDIA_PATTERN.search(Path(filename).stem))
 
     def fetch_poster(self, candidate: MovieCandidate, destination: Path) -> bool:
         if not candidate.poster_ref:

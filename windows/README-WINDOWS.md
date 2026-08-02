@@ -122,3 +122,8 @@ Open **Diagnostics → Maintenance**.
 - **Factory reset ReelIndex** removes all database content, including sources and stored credentials, then returns the app to first-run state.
 
 Both actions require a typed confirmation and are disabled while a scan is active. Neither action changes media files or sidecar artwork/metadata.
+
+
+## Version 1.2.3 scan optimization
+
+Version 1.2.3 uses MediaInfo's fastest parse mode, reduces the Quick-scan MediaInfo timeout to eight seconds, never launches ffprobe during a Quick scan, and stops launching an analyzer for the remainder of a scan after a full worker batch times out. Quick-scan analyzer failures are cached as filesystem-only metadata so unchanged files do not stall every later scan. Trailer, sample, and extras clips are excluded when a primary movie file is present.

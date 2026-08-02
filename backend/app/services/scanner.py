@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -60,6 +61,38 @@ class PosterResult:
     found: bool
     overview: str | None = None
     tmdb_id: int | None = None
+
+
+class AnalyzerCircuitBreaker:
+    """Stop repeatedly launching an analyzer that is timing out for this scan."""
+
+    def __init__(self, name: str, threshold: int = 4):
+        self.name = name
+        self.threshold = max(1, threshold)
+        self._timeouts = 0
+        self._disabled = False
+        self._lock = threading.Lock()
+
+    def available(self) -> bool:
+        with self._lock:
+            return not self._disabled
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._timeouts = 0
+
+    def record_error(self, error: str | None) -> bool:
+        """Return True only when this call transitions the circuit to disabled."""
+        if not error or "timed out" not in error.lower():
+            return False
+        with self._lock:
+            if self._disabled:
+                return False
+            self._timeouts += 1
+            if self._timeouts >= self.threshold:
+                self._disabled = True
+                return True
+        return False
 
 
 class ScanManager:
@@ -474,6 +507,8 @@ class ScanManager:
         stage_started = time.perf_counter()
         workers = max(1, min(settings.probe_workers, len(jobs)))
         logger.info("Running %s analysis for %d files with %d workers", mode, len(jobs), workers)
+        mediainfo_circuit = AnalyzerCircuitBreaker("MediaInfo", threshold=workers)
+        ffprobe_circuit = AnalyzerCircuitBreaker("ffprobe", threshold=workers)
 
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reelindex-probe")
         scan_event_store.append(
@@ -493,6 +528,8 @@ class ScanManager:
                     run_id, level, stage, message
                 ),
                 verbose,
+                mediainfo_circuit,
+                ffprobe_circuit,
             ): job
             for job in jobs
         }
@@ -849,12 +886,52 @@ class ScanManager:
         return merged
 
     @staticmethod
+    def _basic_file_technical(file_candidate: Any, mode: str, warning: str | None = None) -> dict[str, Any]:
+        """Return zero-I/O metadata so a Quick scan can cache an analyzer failure."""
+        suffix = Path(file_candidate.filename).suffix.lower().lstrip(".")
+        container_map = {
+            "mkv": "matroska",
+            "webm": "webm",
+            "mp4": "mp4",
+            "m4v": "mp4",
+            "mov": "mov",
+            "avi": "avi",
+            "ts": "mpegts",
+            "m2ts": "mpegts",
+            "mpg": "mpeg",
+            "mpeg": "mpeg",
+            "wmv": "asf",
+        }
+        filename = file_candidate.filename.lower()
+        resolution = None
+        for pattern, label in (
+            (r"(?:^|[^0-9])2160p(?:[^0-9]|$)|(?:^|[^0-9])4k(?:[^a-z0-9]|$)", "4K"),
+            (r"(?:^|[^0-9])1080p(?:[^0-9]|$)", "1080p"),
+            (r"(?:^|[^0-9])720p(?:[^0-9]|$)", "720p"),
+            (r"(?:^|[^0-9])576p(?:[^0-9]|$)", "576p"),
+            (r"(?:^|[^0-9])480p(?:[^0-9]|$)", "480p"),
+        ):
+            if re.search(pattern, filename):
+                resolution = label
+                break
+        return {
+            "container": container_map.get(suffix, suffix or None),
+            "resolution_label": resolution,
+            "analysis_source": "filesystem-fallback",
+            "analysis_mode": mode,
+            "analysis_warning": warning,
+            "raw": {"warning": warning, "inferred_from_filename": True},
+        }
+
+    @staticmethod
     def _analyze_file(
         file_candidate: Any,
         cancel_event: threading.Event | None = None,
         mode: str = "quick",
         event_callback: Any | None = None,
         verbose: bool = False,
+        mediainfo_circuit: AnalyzerCircuitBreaker | None = None,
+        ffprobe_circuit: AnalyzerCircuitBreaker | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         def event(level: str, stage: str, message: str) -> None:
             if event_callback:
@@ -879,45 +956,71 @@ class ScanManager:
         if not file_candidate.local_path:
             return finish({}, "Media file is not locally accessible and the server supplied no technical metadata")
 
-        event("info", "mediainfo", f"Reading headers: {file_candidate.filename}")
-        mediainfo_started = time.perf_counter()
-        quick, quick_error = analyze_media_quick(file_candidate.local_path, cancel_event)
-        if verbose:
-            elapsed = time.perf_counter() - mediainfo_started
-            event("debug", "timing", f"MediaInfo {elapsed:.3f}s: {file_candidate.filename}")
-        if quick:
-            quick["analysis_source"] = "mediainfo"
-            quick["analysis_mode"] = mode
-            # Quick scans intentionally stop after the lightweight header pass.
-            if mode == "quick" or not ScanManager._needs_deep_fallback(quick):
-                return finish(quick, None)
-
-        # MediaInfo is the normal path. ffprobe is now a compatibility/deep fallback
-        # rather than the first operation for every movie.
-        should_fallback = mode == "deep" or not quick
-        if should_fallback:
-            event(
-                "warning" if quick_error else "info",
-                "ffprobe",
-                f"Using ffprobe fallback: {file_candidate.filename}",
-            )
-            ffprobe_started = time.perf_counter()
-            probed, probe_error = probe_media(file_candidate.local_path, cancel_event)
+        quick: dict[str, Any] = {}
+        quick_error: str | None = None
+        media_available = mediainfo_circuit is None or mediainfo_circuit.available()
+        if media_available:
+            event("info", "mediainfo", f"Reading headers: {file_candidate.filename}")
+            mediainfo_started = time.perf_counter()
+            quick, quick_error = analyze_media_quick(file_candidate.local_path, cancel_event)
             if verbose:
-                elapsed = time.perf_counter() - ffprobe_started
-                event("debug", "timing", f"ffprobe {elapsed:.3f}s: {file_candidate.filename}")
-            if probed:
-                if quick:
-                    technical = ScanManager._merge_technical(quick, probed)
-                    technical["analysis_source"] = "mediainfo+ffprobe"
-                else:
-                    technical = probed
-                    technical["analysis_source"] = "ffprobe"
-                technical["analysis_mode"] = "deep" if mode == "deep" else "quick"
-                return finish(technical, None)
-            return finish(quick or {}, probe_error or quick_error)
+                elapsed = time.perf_counter() - mediainfo_started
+                event("debug", "timing", f"MediaInfo {elapsed:.3f}s: {file_candidate.filename}")
+            if quick:
+                if mediainfo_circuit:
+                    mediainfo_circuit.record_success()
+                quick["analysis_source"] = "mediainfo"
+                quick["analysis_mode"] = mode
+                if mode == "quick" or not ScanManager._needs_deep_fallback(quick):
+                    return finish(quick, None)
+            elif mediainfo_circuit and mediainfo_circuit.record_error(quick_error):
+                event(
+                    "warning",
+                    "mediainfo",
+                    f"MediaInfo timed out on {mediainfo_circuit.threshold} files; skipping it for the rest of this scan",
+                )
+        else:
+            quick_error = "MediaInfo skipped after repeated timeouts in this scan"
 
-        return finish(quick or {}, quick_error)
+        # Quick means quick: never spend another 45 seconds on ffprobe when the
+        # lightweight analyzer fails. Cache a filesystem-only result so unchanged
+        # files are not retried on every subsequent Quick scan.
+        if mode == "quick":
+            warning = quick_error or "MediaInfo returned incomplete metadata"
+            event("warning", "analyze", f"Quick metadata fallback: {file_candidate.filename} ({warning})")
+            return finish(ScanManager._basic_file_technical(file_candidate, mode, warning), None)
+
+        # Deep scans may use ffprobe, but stop launching it after a full worker
+        # batch times out. FFmpeg documents probesize/analyzeduration as the knobs
+        # that control probe latency; probe.py uses conservative bounded values.
+        if ffprobe_circuit is not None and not ffprobe_circuit.available():
+            error = "ffprobe skipped after repeated timeouts in this scan"
+            return finish(quick or ScanManager._basic_file_technical(file_candidate, mode, error), error)
+
+        event("warning" if quick_error else "info", "ffprobe", f"Using ffprobe fallback: {file_candidate.filename}")
+        ffprobe_started = time.perf_counter()
+        probed, probe_error = probe_media(file_candidate.local_path, cancel_event)
+        if verbose:
+            elapsed = time.perf_counter() - ffprobe_started
+            event("debug", "timing", f"ffprobe {elapsed:.3f}s: {file_candidate.filename}")
+        if probed:
+            if ffprobe_circuit:
+                ffprobe_circuit.record_success()
+            if quick:
+                technical = ScanManager._merge_technical(quick, probed)
+                technical["analysis_source"] = "mediainfo+ffprobe"
+            else:
+                technical = probed
+                technical["analysis_source"] = "ffprobe"
+            technical["analysis_mode"] = "deep"
+            return finish(technical, None)
+        if ffprobe_circuit and ffprobe_circuit.record_error(probe_error):
+            event(
+                "warning",
+                "ffprobe",
+                f"ffprobe timed out on {ffprobe_circuit.threshold} files; skipping it for the rest of this scan",
+            )
+        return finish(quick or ScanManager._basic_file_technical(file_candidate, mode, probe_error), probe_error or quick_error)
 
     @staticmethod
     def _apply_technical(record: MediaFile, technical: dict[str, Any], error: str | None) -> None:
@@ -935,6 +1038,7 @@ class ScanManager:
             "_reelindex": {
                 "source": technical.get("analysis_source") or "unknown",
                 "mode": technical.get("analysis_mode") or "unknown",
+                "warning": technical.get("analysis_warning"),
             },
             "raw": technical.get("raw", technical),
         }

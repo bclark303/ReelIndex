@@ -33,3 +33,23 @@ def test_normalize_mediainfo_json():
     assert result["audio_codec"] == "eac3"
     assert result["audio_channels"] == 6
     assert result["audio_languages"] == "en, fr"
+
+
+def test_quick_command_uses_fast_parse_options(monkeypatch):
+    import json
+    import app.services.mediainfo as mediainfo_module
+
+    captured = {}
+
+    def fake_run(command, timeout, cancel_event=None):
+        captured["command"] = command
+        payload = {"media": {"track": [{"@type": "General", "Format": "Matroska"}]}}
+        return mediainfo_module.subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(mediainfo_module, "_run_hidden", fake_run)
+    result, error = mediainfo_module.analyze_media_quick(Path("Example.mkv"))
+
+    assert error is None
+    assert "--ParseSpeed=0" in captured["command"]
+    assert "--File_TestContinuousFileNames=0" in captured["command"]
+    assert result["container"] == "matroska"

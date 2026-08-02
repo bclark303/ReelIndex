@@ -126,3 +126,16 @@ def test_local_poster_replaces_existing_cached_poster(tmp_path):
 
     assert result.found is True
     assert destination.read_bytes() == b"new-local-poster"
+
+
+def test_filesystem_excludes_trailers_and_samples_when_movie_is_present(tmp_path):
+    movie = tmp_path / "Example Movie (2024)"
+    movie.mkdir()
+    (movie / "Example Movie (2024) Bluray-1080p.mkv").write_bytes(b"movie")
+    (movie / "Example Movie-1080p-trailer.mov").write_bytes(b"trailer")
+    (movie / "sample.mkv").write_bytes(b"sample")
+
+    results = FilesystemAdapter(str(tmp_path), {}).scan()
+
+    assert len(results) == 1
+    assert [item.filename for item in results[0].files] == ["Example Movie (2024) Bluray-1080p.mkv"]

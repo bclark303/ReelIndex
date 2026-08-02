@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     tmdb_api_token: str | None = None
     poster_width: int = 500
     max_probe_seconds: int = 45
-    max_mediainfo_seconds: int = 20
+    max_mediainfo_seconds: int = 8
     probe_workers: int = 4
     poster_workers: int = 6
     scan_commit_interval: int = 50
