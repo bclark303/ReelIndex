@@ -55,7 +55,7 @@ def install_python_dependencies(build_python: Path, runtime: Path, report: Path)
 def clean_payload(root: Path) -> None:
     for path in sorted(root.rglob("__pycache__"), reverse=True):
         shutil.rmtree(path, ignore_errors=True)
-    for pattern in ("*.pyc", "*.pyo"):
+    for pattern in ("*.pyc", "*.pyo", "*.ps1", "*.bat", "*.cmd"):
         for path in root.rglob(pattern):
             path.unlink(missing_ok=True)
     for path in root.rglob("*.dist-info/RECORD"):
