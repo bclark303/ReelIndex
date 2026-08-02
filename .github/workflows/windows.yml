@@ -30,6 +30,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      REELINDEX_DATA_DIR: ${{ runner.temp }}/reelindex-identity-tests
     steps:
       - uses: actions/checkout@v4
         with:
