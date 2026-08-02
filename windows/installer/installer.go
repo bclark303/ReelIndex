@@ -18,7 +18,8 @@ import (
 	"unsafe"
 )
 
-const version = "1.4.9"
+const appVersion = "1.4.8"
+const packageVersion = "1.4.8.1"
 
 //go:embed payload.zip
 var payload []byte
@@ -262,7 +263,7 @@ func configureUninstall(installDir string) error {
 		value     string
 	}{
 		{"DisplayName", "REG_SZ", "ReelIndex Movie Inventory"},
-		{"DisplayVersion", "REG_SZ", version},
+		{"DisplayVersion", "REG_SZ", packageVersion},
 		{"Publisher", "REG_SZ", "ReelIndex"},
 		{"InstallLocation", "REG_SZ", installDir},
 		{"DisplayIcon", "REG_SZ", filepath.Join(installDir, "ReelIndex.exe")},
@@ -345,7 +346,7 @@ func install() error {
 func main() {
 	if msg(
 		"ReelIndex Setup",
-		"Install ReelIndex Movie Inventory "+version+" for this Windows user?\n\nThis offline installer does not use PowerShell, download scripts, or access the network. Its embedded payload is verified with SHA-256 before installation.",
+		"Install ReelIndex Movie Inventory "+appVersion+" (secure Windows package "+packageVersion+") for this Windows user?\n\nThis offline installer does not use PowerShell, download scripts, or access the network. Its embedded payload is verified with SHA-256 before installation.",
 		0x44|0x20,
 	) != 6 {
 		return
@@ -354,5 +355,5 @@ func main() {
 		fail(err)
 		return
 	}
-	msg("ReelIndex Setup", "ReelIndex "+version+" was installed successfully and is opening in your default browser.", 0x40)
+	msg("ReelIndex Setup", "ReelIndex "+appVersion+" was installed successfully from secure package "+packageVersion+" and is opening in your default browser.", 0x40)
 }
