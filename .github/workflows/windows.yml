@@ -1,24 +1,261 @@
-name: Windows installer (quarantined)
+name: Secure Windows installer
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+      - backend/app/**
+      - web/**
+      - windows/**
+      - scripts/build_windows_offline_payload.py
+      - scripts/sync-packages.py
+      - .github/workflows/windows.yml
+  pull_request:
+    paths:
+      - VERSION
+      - backend/app/**
+      - web/**
+      - windows/**
+      - scripts/build_windows_offline_payload.py
+      - scripts/sync-packages.py
+      - .github/workflows/windows.yml
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: secure-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WINDOWS_PACKAGE_VERSION: 1.4.8.1
 
 jobs:
-  quarantined:
+  build-scan:
     runs-on: windows-latest
     steps:
-      - name: Block unsafe installer publication
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+
+      - name: Verify synchronized source payload
         shell: pwsh
         run: |
-          Write-Error @'
-          Windows installer publishing is quarantined after Microsoft Defender
-          detected the unsigned self-extracting setup executable as
-          Trojan:Win32/Sabsik.FL.A!ml. Do not restore this workflow until the
-          installer no longer uses ExecutionPolicy Bypass or downloaded script
-          execution, dependencies are integrity-pinned, and the final artifact
-          passes Microsoft Defender scanning on a Windows runner.
-          '@
-          exit 1
+          python scripts/sync-packages.py --check
+          if (Test-Path windows/installer/install-runtime.ps1) {
+            throw 'The quarantined PowerShell runtime installer must not exist.'
+          }
+          $unsafe = Select-String -Path windows/installer/*.go -Pattern @(
+            'powershell',
+            'ExecutionPolicy',
+            'Invoke-WebRequest',
+            'get-pip.py',
+            'https?://'
+          ) -CaseSensitive:$false
+          if ($unsafe) {
+            $unsafe | Format-Table | Out-String | Write-Error
+            throw 'Installer source contains a prohibited downloader or PowerShell pattern.'
+          }
+
+      - name: Build fully offline payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appVersion = (Get-Content VERSION -Raw).Trim()
+          $payload = Join-Path $PWD 'build/windows-payload'
+          $archive = Join-Path $PWD 'windows/installer/payload.zip'
+          Remove-Item build/windows-payload,windows/installer/payload.zip -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $payload,dist -Force | Out-Null
+
+          go build -trimpath -ldflags='-s -w -H=windowsgui' -o (Join-Path $payload 'ReelIndex.exe') windows/launcher/main.go
+          go build -trimpath -ldflags='-s -w -H=windowsgui' -o (Join-Path $payload 'Uninstall ReelIndex.exe') windows/installer/uninstall.go
+
+          python scripts/build_windows_offline_payload.py `
+            --python-root $env:pythonLocation `
+            --output $payload `
+            --archive $archive `
+            --version $appVersion
+
+          & (Join-Path $payload 'runtime/python.exe') -c "import fastapi, uvicorn, sqlalchemy, pydantic_settings, httpx, cryptography, multipart; print('offline runtime imports passed')"
+          $scripts = Get-ChildItem $payload -Recurse -File -Include *.ps1,*.bat,*.cmd
+          if ($scripts) {
+            $scripts | Format-Table FullName | Out-String | Write-Error
+            throw 'The offline payload contains prohibited command or PowerShell scripts.'
+          }
+
+      - name: Smoke-test bundled ReelIndex runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $payload = Join-Path $PWD 'build/windows-payload'
+          $smokeData = Join-Path $env:RUNNER_TEMP 'reelindex-windows-smoke'
+          Remove-Item $smokeData -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $smokeData -Force | Out-Null
+          $env:LOCALAPPDATA = $smokeData
+          $process = Start-Process `
+            -FilePath (Join-Path $payload 'runtime/python.exe') `
+            -ArgumentList (Join-Path $payload 'app/windows_launcher.py') `
+            -WorkingDirectory $payload `
+            -PassThru `
+            -WindowStyle Hidden
+          try {
+            $portFile = Join-Path $smokeData 'ReelIndex/server.port'
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 90; $attempt++) {
+              if ($process.HasExited) {
+                throw "Bundled ReelIndex runtime exited with code $($process.ExitCode)."
+              }
+              if (Test-Path $portFile) {
+                $port = (Get-Content $portFile -Raw).Trim()
+                try {
+                  $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/health" -TimeoutSec 2
+                  if ($health.status -eq 'ok') {
+                    $ready = $true
+                    break
+                  }
+                } catch {}
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ready) {
+              throw 'Bundled ReelIndex runtime did not become healthy.'
+            }
+            $expected = (Get-Content VERSION -Raw).Trim()
+            if ($health.version -ne $expected -or $health.edition -ne 'Windows') {
+              throw "Unexpected health response: $($health | ConvertTo-Json -Compress)"
+            }
+          } finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: Build offline setup executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifact = Join-Path $PWD "dist/ReelIndex-Windows-Setup-v$env:WINDOWS_PACKAGE_VERSION.exe"
+          go build -trimpath -ldflags='-s -w -H=windowsgui' -o $artifact windows/installer/installer.go
+          Remove-Item windows/installer/payload.zip -Force
+          $bytes = [System.IO.File]::ReadAllBytes($artifact)
+          if ($bytes.Length -lt 10000000 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+            throw "Setup output is not a plausible Windows PE executable: $($bytes.Length) bytes"
+          }
+
+      - name: Microsoft Defender release gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifact = (Resolve-Path "dist/ReelIndex-Windows-Setup-v$env:WINDOWS_PACKAGE_VERSION.exe").Path
+          $payload = (Resolve-Path 'build/windows-payload').Path
+          $platform = Join-Path $env:ProgramData 'Microsoft/Windows Defender/Platform'
+          $mpCmdRun = Get-ChildItem $platform -Recurse -Filter MpCmdRun.exe -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $mpCmdRun) {
+            $fallback = Join-Path $env:ProgramFiles 'Windows Defender/MpCmdRun.exe'
+            if (Test-Path $fallback) {
+              $mpCmdRun = Get-Item $fallback
+            }
+          }
+          if (-not $mpCmdRun) {
+            throw 'Microsoft Defender MpCmdRun.exe is unavailable; publication is blocked.'
+          }
+
+          $statusBefore = Get-MpComputerStatus
+          if (-not $statusBefore.AMServiceEnabled -or -not $statusBefore.AntivirusEnabled) {
+            throw 'Microsoft Defender Antivirus is not enabled; publication is blocked.'
+          }
+
+          & $mpCmdRun.FullName -SignatureUpdate
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Defender signature update failed with exit code $LASTEXITCODE."
+          }
+          $scanStarted = Get-Date
+          & $mpCmdRun.FullName -Scan -ScanType 3 -File $payload -DisableRemediation
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Defender rejected the unpacked payload with exit code $LASTEXITCODE."
+          }
+          & $mpCmdRun.FullName -Scan -ScanType 3 -File $artifact -DisableRemediation
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Defender rejected the setup executable with exit code $LASTEXITCODE."
+          }
+
+          $detections = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object {
+            $_.InitialDetectionTime -ge $scanStarted.AddMinutes(-1)
+          })
+          if ($detections.Count -gt 0) {
+            $detections | ConvertTo-Json -Depth 6 | Write-Error
+            throw 'Microsoft Defender reported a threat detection; publication is blocked.'
+          }
+
+          $status = Get-MpComputerStatus
+          $hash = Get-FileHash $artifact -Algorithm SHA256
+          $reportPath = Join-Path $PWD "dist/ReelIndex-Windows-Setup-v$env:WINDOWS_PACKAGE_VERSION.defender.json"
+          [ordered]@{
+            schema = 1
+            artifact = Split-Path $artifact -Leaf
+            artifact_sha256 = $hash.Hash.ToLowerInvariant()
+            application_version = (Get-Content VERSION -Raw).Trim()
+            package_version = $env:WINDOWS_PACKAGE_VERSION
+            scan_result = 'clean'
+            scan_type = 'Microsoft Defender custom scan of unpacked payload and final executable'
+            scan_completed_utc = (Get-Date).ToUniversalTime().ToString('o')
+            defender_product_version = $status.AMProductVersion
+            defender_engine_version = $status.AMEngineVersion
+            defender_signature_version = $status.AntivirusSignatureVersion
+            defender_signature_updated_utc = $status.AntivirusSignatureLastUpdated.ToUniversalTime().ToString('o')
+            workflow_repository = $env:GITHUB_REPOSITORY
+            workflow_run_id = $env:GITHUB_RUN_ID
+            workflow_commit = $env:GITHUB_SHA
+          } | ConvertTo-Json -Depth 5 | Set-Content $reportPath -Encoding UTF8
+
+      - name: Update SHA-256 manifest
+        shell: pwsh
+        run: |
+          $artifact = Get-Item "dist/ReelIndex-Windows-Setup-v$env:WINDOWS_PACKAGE_VERSION.exe"
+          $report = Get-Item "dist/ReelIndex-Windows-Setup-v$env:WINDOWS_PACKAGE_VERSION.defender.json"
+          $manifest = 'dist/SHA256SUMS.txt'
+          $lines = if (Test-Path $manifest) { @(Get-Content $manifest) } else { @() }
+          $lines = @($lines | Where-Object {
+            $_ -notmatch [regex]::Escape($artifact.Name) -and $_ -notmatch [regex]::Escape($report.Name)
+          })
+          $artifactHash = (Get-FileHash $artifact.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $reportHash = (Get-FileHash $report.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $lines += "$artifactHash  $($artifact.Name)"
+          $lines += "$reportHash  $($report.Name)"
+          Set-Content $manifest ($lines -join "`n") -Encoding UTF8
+          Add-Content $manifest '' -Encoding UTF8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReelIndex-Windows-Setup-${{ env.WINDOWS_PACKAGE_VERSION }}
+          path: |
+            dist/ReelIndex-Windows-Setup-v${{ env.WINDOWS_PACKAGE_VERSION }}.exe
+            dist/ReelIndex-Windows-Setup-v${{ env.WINDOWS_PACKAGE_VERSION }}.defender.json
+            dist/SHA256SUMS.txt
+            build/windows-python-dependencies.json
+          if-no-files-found: error
+
+      - name: Publish Defender-scanned installer
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f "dist/ReelIndex-Windows-Setup-v$env:WINDOWS_PACKAGE_VERSION.exe"
+          git add "dist/ReelIndex-Windows-Setup-v$env:WINDOWS_PACKAGE_VERSION.defender.json" dist/SHA256SUMS.txt
+          if (git diff --cached --quiet) {
+            Write-Host 'Defender-scanned installer is already current.'
+            exit 0
+          }
+          git commit -m "Publish Defender-scanned Windows Setup v$env:WINDOWS_PACKAGE_VERSION [skip ci]"
+          git push
