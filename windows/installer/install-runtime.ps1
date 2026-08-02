@@ -47,6 +47,21 @@ try {
         if ($license) { Copy-Item $license.FullName (Join-Path $toolsDir 'FFMPEG-LICENSE.txt') -Force }
     }
 
+    $mediaInfoExe = Join-Path $toolsDir 'mediainfo.exe'
+    if (-not (Test-Path $mediaInfoExe)) {
+        $mediaInfoZip = Join-Path $tempDir 'mediainfo.zip'
+        $mediaInfoExtract = Join-Path $tempDir 'mediainfo'
+        Get-RemoteFile 'https://mediaarea.net/download/binary/mediainfo/26.05/MediaInfo_CLI_26.05_Windows_x64.zip' $mediaInfoZip 'MediaInfo CLI'
+        Expand-Archive -Path $mediaInfoZip -DestinationPath $mediaInfoExtract -Force
+        $foundMediaInfo = Get-ChildItem -Path $mediaInfoExtract -Recurse -Filter 'MediaInfo.exe' | Select-Object -First 1
+        if (-not $foundMediaInfo) { throw 'MediaInfo.exe was not found in the downloaded MediaInfo package' }
+        Copy-Item $foundMediaInfo.FullName $mediaInfoExe -Force
+        Get-ChildItem -Path $foundMediaInfo.DirectoryName -Filter '*.dll' -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName (Join-Path $toolsDir $_.Name) -Force }
+        $mediaInfoLicense = Get-ChildItem -Path $mediaInfoExtract -Recurse -Filter 'LICENSE*' | Select-Object -First 1
+        if ($mediaInfoLicense) { Copy-Item $mediaInfoLicense.FullName (Join-Path $toolsDir 'MEDIAINFO-LICENSE.txt') -Force }
+    }
+
     $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\ReelIndex'
     New-Item -ItemType Directory -Path $startMenu -Force | Out-Null
     $shell = New-Object -ComObject WScript.Shell
@@ -68,7 +83,7 @@ try {
     $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ReelIndex'
     New-Item -Path $uninstallKey -Force | Out-Null
     Set-ItemProperty $uninstallKey DisplayName 'ReelIndex Movie Inventory'
-    Set-ItemProperty $uninstallKey DisplayVersion '1.1.3'
+    Set-ItemProperty $uninstallKey DisplayVersion '1.2.0'
     Set-ItemProperty $uninstallKey Publisher 'ReelIndex'
     Set-ItemProperty $uninstallKey InstallLocation $InstallDir
     Set-ItemProperty $uninstallKey DisplayIcon $launcher

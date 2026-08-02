@@ -15,7 +15,7 @@ Administrator rights are not required. The program is installed per-user.
 
 1. Download `ReelIndex-Windows-Setup.exe`.
 2. Double-click it and approve the installation prompt.
-3. A PowerShell progress window downloads and installs the Python runtime, application dependencies, and `ffprobe`.
+3. A PowerShell progress window downloads and installs the Python runtime, application dependencies, MediaInfo CLI, and `ffprobe`.
 4. When setup completes, ReelIndex opens in the default browser.
 
 The installer is not digitally signed. Windows SmartScreen may identify it as an unknown publisher. Review the checksum supplied with the download before running it.
@@ -29,7 +29,8 @@ The installer is not digitally signed. Windows SmartScreen may identify it as an
    - **Plex** — server URL and read-only token
    - **Jellyfin** — server URL and API key
    - **Emby** — server URL and API key
-4. Test the connection, save the source, and start a scan.
+4. Test the connection and save the source.
+5. Start with **Quick scan**. Use **Deep scan** only when you need to fill technical fields that MediaInfo could not obtain.
 
 Filesystem examples:
 
@@ -92,31 +93,26 @@ Application log:
 
 For a mapped network drive, ReelIndex must be launched under the same Windows account that owns the drive mapping. A UNC path is usually more dependable for network shares.
 
-## Scan performance in version 1.1
+## Tiered media analysis in version 1.2
 
-- Directory discovery reuses Windows directory-entry metadata instead of reopening each folder for every movie file.
-- Movie and file counts update while discovery is still running.
-- The inventory is committed before technical analysis and poster enrichment finish.
-- Up to four changed files are analyzed concurrently by default.
-- Plex, Jellyfin, and Emby technical metadata is used directly instead of reopening mapped network files with `ffprobe`.
-- Poster retrieval uses up to six concurrent workers.
-- The Library and Sources pages refresh during active scans, so results appear progressively.
+ReelIndex no longer launches `ffprobe` for every changed filesystem movie. The analyzer now uses this order:
 
-The first filesystem scan still has to read every directory and inspect every media file. Later scans reuse cached technical metadata whenever file size and modification time have not changed.
+1. Reuse Plex, Jellyfin, or Emby technical metadata when available.
+2. Read local `.nfo`/JSON sidecars and local poster artwork during directory discovery.
+3. Run MediaInfo CLI for a lightweight container-header analysis.
+4. Run `ffprobe` only when a **Deep scan** still has important missing fields, or when MediaInfo is unavailable and a compatibility fallback is required.
 
+**Quick scan** is the recommended default for local and network folders. It stops after the MediaInfo pass and makes the inventory usable as quickly as possible. **Deep scan** upgrades Quick-scan cache entries only when needed; files already analyzed deeply are reused while unchanged. Scheduled scans use Quick mode.
 
-## Scan cancellation in version 1.1.2
+Directory counts update during discovery, the inventory is committed before enrichment completes, and changed files are analyzed concurrently. Later scans reuse cached results whenever file size and modification time have not changed.
 
-Active scans can be cancelled from the progress banner or from the Sources page. ReelIndex stops discovery, pending media analysis, and pending poster work, terminates active ffprobe processes, and records the run as cancelled. Movies already indexed before cancellation remain available; media files are never modified.
+## Scan cancellation
 
+Active scans can be cancelled from the progress banner or the Sources page. ReelIndex stops discovery, pending MediaInfo/ffprobe work, and pending poster work, then records the run as cancelled. Movies indexed before cancellation remain available; media files are never modified.
 
-## UI update reliability in version 1.1.3
+## UI update reliability
 
-ReelIndex now cache-busts its browser assets and marks the web UI as no-cache.
-The footer displays the installed UI version. During an active scan, a red
-**Cancel scan** button appears in the sticky scan banner and on the source card.
-If scan state cannot be loaded, the interface displays that API error rather
-than silently hiding scan controls.
+ReelIndex cache-busts browser assets and displays the installed version in the footer. If scan state cannot be loaded, the interface displays the API error rather than silently hiding scan controls.
 
 ## Clear cached data or start over
 

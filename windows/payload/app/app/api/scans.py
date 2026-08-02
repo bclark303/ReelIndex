@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -30,12 +32,16 @@ def _out(run: ScanRun, source_name: str | None = None) -> ScanRunOut:
 
 
 @router.post("/{source_id}", response_model=ScanRunOut, status_code=status.HTTP_202_ACCEPTED)
-def start_scan(source_id: str, db: Session = Depends(get_db)):
+def start_scan(
+    source_id: str,
+    mode: Literal["quick", "deep"] = "quick",
+    db: Session = Depends(get_db),
+):
     source = db.get(Source, source_id)
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        run_id = scan_manager.start(source_id)
+        run_id = scan_manager.start(source_id, mode=mode)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     run = db.get(ScanRun, run_id)

@@ -13,10 +13,12 @@ class Settings(BaseSettings):
     tmdb_api_token: str | None = None
     poster_width: int = 500
     max_probe_seconds: int = 45
+    max_mediainfo_seconds: int = 20
     probe_workers: int = 4
     poster_workers: int = 6
     scan_commit_interval: int = 50
     ffprobe_path: str = "ffprobe"
+    mediainfo_path: str = "mediainfo"
     static_dir: Path | None = None
     windows_mode: bool = False
     allowed_extensions: str = ".mkv,.mp4,.m4v,.avi,.mov,.wmv,.ts,.m2ts,.webm,.mpg,.mpeg"

@@ -22,6 +22,7 @@ from app.core.database import SessionLocal
 from app.core.security import reveal_config
 from app.models import MediaFile, Movie, ScanRun, Source
 from app.services.media_utils import sort_title
+from app.services.mediainfo import MediaInfoCancelled, analyze_media_quick
 from app.services.probe import ProbeCancelled, probe_media
 from app.services.tmdb import TmdbClient
 from app.sources.factory import create_adapter
@@ -65,7 +66,9 @@ class ScanManager:
         self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
-    def start(self, source_id: str) -> str:
+    def start(self, source_id: str, mode: str = "quick") -> str:
+        if mode not in {"quick", "deep"}:
+            raise ValueError("Scan mode must be quick or deep")
         with self._lock:
             if source_id in self._active:
                 return self._active[source_id]
@@ -82,15 +85,20 @@ class ScanManager:
             self._cancel_events[run_id] = threading.Event()
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(asyncio.to_thread(self._run_scan, source_id, run_id))
+            loop.create_task(asyncio.to_thread(self._run_scan, source_id, run_id, mode))
         except RuntimeError:
-            thread = threading.Thread(target=self._run_scan, args=(source_id, run_id), daemon=True)
+            thread = threading.Thread(target=self._run_scan, args=(source_id, run_id, mode), daemon=True)
             thread.start()
         return run_id
 
     def active_run(self, source_id: str) -> str | None:
         with self._lock:
             return self._active.get(source_id)
+
+    def active_runs(self) -> dict[str, str]:
+        """Return a snapshot of source IDs and their active scan run IDs."""
+        with self._lock:
+            return dict(self._active)
 
     def cancel(self, run_id: str) -> bool:
         with self._lock:
@@ -151,13 +159,13 @@ class ScanManager:
                 return result
             raise result
 
-    def _run_scan(self, source_id: str, run_id: str) -> None:
+    def _run_scan(self, source_id: str, run_id: str, mode: str = "quick") -> None:
         with self._lock:
             cancel_event = self._cancel_events.get(run_id)
         if cancel_event is None:
             cancel_event = threading.Event()
         try:
-            self._execute_scan(source_id, run_id, cancel_event)
+            self._execute_scan(source_id, run_id, cancel_event, mode)
         except ScanCancelled:
             with SessionLocal() as db:
                 run = db.get(ScanRun, run_id)
@@ -181,7 +189,9 @@ class ScanManager:
                     self._active.pop(source_id, None)
                 self._cancel_events.pop(run_id, None)
 
-    def _execute_scan(self, source_id: str, run_id: str, cancel_event: threading.Event) -> None:
+    def _execute_scan(
+        self, source_id: str, run_id: str, cancel_event: threading.Event, mode: str
+    ) -> None:
         self._raise_if_cancelled(cancel_event)
         with SessionLocal() as db:
             source = db.get(Source, source_id)
@@ -189,7 +199,7 @@ class ScanManager:
             if not source or not run:
                 raise ValueError("Source or scan run no longer exists")
             run.status = "running"
-            run.current_item = "Discovering movies…"
+            run.current_item = f"{mode.title()} scan · discovering movies…"
             db.commit()
             config = reveal_config(json.loads(source.config_json or "{}"))
             adapter = create_adapter(source.type, source.url_or_path, source.library_id, config)
@@ -295,7 +305,11 @@ class ScanManager:
                         db.add(file_record)
                         db.flush()
                     seen_file_ids.add(file_record.id)
-                    unchanged = file_record.fingerprint == file_candidate.fingerprint and bool(file_record.probe_json)
+                    unchanged = (
+                        file_record.fingerprint == file_candidate.fingerprint
+                        and not file_record.probe_error
+                        and self._cached_analysis_satisfies(file_record.probe_json, mode)
+                    )
                     file_record.path = file_candidate.path
                     file_record.filename = file_candidate.filename
                     file_record.size_bytes = file_candidate.size_bytes
@@ -309,7 +323,10 @@ class ScanManager:
                     elif self._has_server_technical(file_candidate.technical):
                         # Plex/Jellyfin/Emby already provide the fields needed by the
                         # competition. Do not reopen every media file over the network.
-                        self._apply_technical(file_record, file_candidate.technical, None)
+                        server_technical = dict(file_candidate.technical)
+                        server_technical["analysis_source"] = "media-server"
+                        server_technical["analysis_mode"] = "deep"
+                        self._apply_technical(file_record, server_technical, None)
                         run.analyzed_count += 1
                     else:
                         probe_jobs.append(ProbeJob(file_record.id, file_candidate.filename, file_candidate))
@@ -333,12 +350,12 @@ class ScanManager:
 
             run.current_item = (
                 f"Inventory ready · {len(candidates):,} movies / {total_files:,} files · "
-                f"analyzing {len(probe_jobs):,} changed files"
+                f"{mode} analysis for {len(probe_jobs):,} changed files"
             )
             db.commit()
 
         self._raise_if_cancelled(cancel_event)
-        self._run_probe_jobs(run_id, probe_jobs, cancel_event)
+        self._run_probe_jobs(run_id, probe_jobs, cancel_event, mode)
         self._raise_if_cancelled(cancel_event)
         self._fill_missing_runtimes(source_id, cancel_event)
         self._raise_if_cancelled(cancel_event)
@@ -359,15 +376,16 @@ class ScanManager:
         run_id: str,
         jobs: list[ProbeJob],
         cancel_event: threading.Event,
+        mode: str,
     ) -> None:
         if not jobs:
             return
         workers = max(1, min(settings.probe_workers, len(jobs)))
-        logger.info("Analyzing %d files with %d ffprobe workers", len(jobs), workers)
+        logger.info("Running %s analysis for %d files with %d workers", mode, len(jobs), workers)
 
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reelindex-probe")
         futures: dict[Future[tuple[dict[str, Any], str | None]], ProbeJob] = {
-            executor.submit(self._analyze_file, job.candidate, cancel_event): job for job in jobs
+            executor.submit(self._analyze_file, job.candidate, cancel_event, mode): job for job in jobs
         }
         pending = set(futures)
         try:
@@ -387,7 +405,7 @@ class ScanManager:
                         job = futures[future]
                         try:
                             technical, error = future.result()
-                        except ProbeCancelled as exc:
+                        except (ProbeCancelled, MediaInfoCancelled) as exc:
                             raise ScanCancelled(str(exc)) from exc
                         except Exception as exc:  # Defensive: a single file must not abort the scan.
                             technical, error = {}, str(exc)
@@ -598,22 +616,92 @@ class ScanManager:
         return any(technical.get(key) not in (None, "") for key in useful)
 
     @staticmethod
+    def _cached_analysis_satisfies(probe_json: str, mode: str) -> bool:
+        if not probe_json:
+            return False
+        if mode == "quick":
+            return True
+        try:
+            payload = json.loads(probe_json)
+        except json.JSONDecodeError:
+            # Older ReelIndex records were created by a full ffprobe pass.
+            return True
+        marker = payload.get("_reelindex", {}) if isinstance(payload, dict) else {}
+        if not marker:
+            # Pre-v1.2 records came from the old full ffprobe-only pipeline.
+            return True
+        cached_mode = marker.get("mode")
+        source = marker.get("source")
+        return cached_mode in {"deep", "server"} or source in {"ffprobe", "media-server", "mediainfo+ffprobe"}
+
+    @staticmethod
+    def _needs_deep_fallback(technical: dict[str, Any]) -> bool:
+        required = (
+            "container",
+            "duration_seconds",
+            "video_codec",
+            "width",
+            "height",
+            "audio_codec",
+            "audio_channels",
+        )
+        return any(technical.get(key) in (None, "") for key in required)
+
+    @staticmethod
+    def _merge_technical(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(primary)
+        for key, value in fallback.items():
+            if key == "raw":
+                continue
+            if merged.get(key) in (None, "") and value not in (None, ""):
+                merged[key] = value
+        merged["raw"] = {
+            "mediainfo": primary.get("raw"),
+            "ffprobe": fallback.get("raw"),
+        }
+        return merged
+
+    @staticmethod
     def _analyze_file(
         file_candidate: Any,
         cancel_event: threading.Event | None = None,
+        mode: str = "quick",
     ) -> tuple[dict[str, Any], str | None]:
         if cancel_event and cancel_event.is_set():
-            raise ProbeCancelled("ffprobe cancelled")
-        # Server metadata is preferred so a Plex/Jellyfin path mapping does not cause
-        # a second, much slower pass over every network media file.
+            raise ProbeCancelled("media analysis cancelled")
         if ScanManager._has_server_technical(file_candidate.technical):
-            return file_candidate.technical, None
-        if file_candidate.local_path:
-            technical, error = probe_media(file_candidate.local_path, cancel_event)
-            if technical:
-                return technical, error
-            return {}, error
-        return {}, "Media file is not locally accessible and the server supplied no technical metadata"
+            technical = dict(file_candidate.technical)
+            technical["analysis_source"] = "media-server"
+            technical["analysis_mode"] = "deep"
+            return technical, None
+        if not file_candidate.local_path:
+            return {}, "Media file is not locally accessible and the server supplied no technical metadata"
+
+        quick, quick_error = analyze_media_quick(file_candidate.local_path, cancel_event)
+        if quick:
+            quick["analysis_source"] = "mediainfo"
+            quick["analysis_mode"] = mode
+            # Quick scans intentionally stop after the lightweight header pass.
+            if mode == "quick" or not ScanManager._needs_deep_fallback(quick):
+                return quick, None
+
+        # MediaInfo is the normal path. ffprobe is now a compatibility/deep fallback
+        # rather than the first operation for every movie.
+        should_fallback = mode == "deep" or not quick
+        if should_fallback:
+            probed, probe_error = probe_media(file_candidate.local_path, cancel_event)
+            if probed:
+                if quick:
+                    technical = ScanManager._merge_technical(quick, probed)
+                    technical["analysis_source"] = "mediainfo+ffprobe"
+                else:
+                    technical = probed
+                    technical["analysis_source"] = "ffprobe"
+                technical["analysis_mode"] = "deep" if mode == "deep" else "quick"
+                return technical, None
+            return quick or {}, probe_error or quick_error
+
+        return quick or {}, quick_error
 
     @staticmethod
     def _apply_technical(record: MediaFile, technical: dict[str, Any], error: str | None) -> None:
@@ -627,7 +715,14 @@ class ScanManager:
         record.audio_codec = technical.get("audio_codec")
         record.audio_channels = technical.get("audio_channels")
         record.audio_languages = technical.get("audio_languages")
-        record.probe_json = json.dumps(technical.get("raw", technical), default=str)
+        payload = {
+            "_reelindex": {
+                "source": technical.get("analysis_source") or "unknown",
+                "mode": technical.get("analysis_mode") or "unknown",
+            },
+            "raw": technical.get("raw", technical),
+        }
+        record.probe_json = json.dumps(payload, default=str)
         record.probe_error = error
 
 

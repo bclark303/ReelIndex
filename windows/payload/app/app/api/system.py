@@ -18,6 +18,7 @@ from app.core.security import reveal_config, sanitize_config
 from app.models import MediaFile, Movie, ScanRun, Source
 from app.schemas.api import DiagnosticsOut
 from app.services.maintenance import MaintenanceBlocked, reset_application_data
+from app.services.mediainfo import mediainfo_version
 from app.services.probe import ffprobe_version
 
 router = APIRouter(tags=["system"])
@@ -38,7 +39,7 @@ def _maintenance_reset(*, confirmation: str, expected: str, include_sources: boo
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "app": settings.app_name, "version": "1.1.5"}
+    return {"status": "ok", "app": settings.app_name, "version": "1.2.0"}
 
 
 @router.get("/posters/{movie_id}")
@@ -59,10 +60,11 @@ def _diagnostics(db: Session) -> dict:
     scans = db.scalars(select(ScanRun).order_by(ScanRun.started_at.desc()).limit(20)).all()
     disk = shutil.disk_usage(settings.data_dir)
     return {
-        "app": {"name": settings.app_name, "version": "1.1.5", "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
+        "app": {"name": settings.app_name, "version": "1.2.0", "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
         "system": {
             "platform": platform.platform(),
             "python": platform.python_version(),
+            "mediainfo": mediainfo_version(),
             "ffprobe": ffprobe_version(),
             "cpu_count": os.cpu_count(),
             "data_disk_total": disk.total,
