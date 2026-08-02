@@ -10,6 +10,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      REELINDEX_DATA_DIR: ${{ runner.temp }}/reelindex-test-data
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
