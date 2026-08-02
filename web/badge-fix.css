@@ -1,4 +1,8 @@
 .poster-badges {
+  top: 50%;
+  bottom: auto;
+  left: 9px;
+  transform: translateY(-50%);
   align-items: flex-start;
   width: max-content;
   max-width: calc(100% - 18px);
