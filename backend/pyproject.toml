@@ -1,0 +1,28 @@
+[project]
+name = "reelindex-backend"
+version = "1.0.0"
+description = "Read-only movie inventory backend"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.116,<1.0",
+  "uvicorn[standard]>=0.35,<1.0",
+  "sqlalchemy>=2.0,<3.0",
+  "pydantic-settings>=2.10,<3.0",
+  "httpx>=0.28,<1.0",
+  "cryptography>=45,<47",
+  "python-multipart>=0.0.20,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9.0",
+  "pytest-cov>=6.2,<7.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
