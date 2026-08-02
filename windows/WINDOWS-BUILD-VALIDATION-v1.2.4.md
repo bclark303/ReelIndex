@@ -1,4 +1,4 @@
-# ReelIndex Windows v1.2.4 Validation
+# ReelIndex Windows v1.3.0 Validation
 
 ## Supplied second scan trace
 
@@ -33,7 +33,7 @@ Auxiliary-file filtering reduced the filesystem inventory from 3,488 files in th
 3. Verbose logging generated one per-file fallback, success, and timing event. This is useful for diagnosis but should be disabled during normal operation.
 4. Poster processing is not a bottleneck in this workload: all 158 poster jobs completed in 8.59 seconds.
 
-## v1.2.4 changes
+## v1.3.0 changes
 
 - Filesystem discovery uses eight bounded workers by default.
 - Independent movie folders are enumerated concurrently to overlap SMB directory latency.
@@ -67,4 +67,4 @@ This benchmark isolates network round-trip latency and is not a prediction of ex
 
 ## Expected next scan
 
-Because the second scan cached all 3,183 files, a normal subsequent Quick scan should spend almost no time in technical analysis. The main measurement to watch after v1.2.4 is the `Discovery complete` line. If eight workers perform well against this share, total scan time should fall substantially below 148 seconds. If the array becomes slower under parallel metadata access, lower the value to four workers.
+Because the second scan cached all 3,183 files, a normal subsequent Quick scan should spend almost no time in technical analysis. The main measurement to watch after v1.3.0 is the `Discovery complete` line. If eight workers perform well against this share, total scan time should fall substantially below 148 seconds. If the array becomes slower under parallel metadata access, lower the value to four workers.

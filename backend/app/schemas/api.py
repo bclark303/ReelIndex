@@ -131,6 +131,11 @@ class ScanRunOut(BaseModel):
     error_message: str | None
     started_at: datetime
     completed_at: datetime | None
+    resumable: bool = False
+    queue_remaining: int = 0
+    queue_total: int = 0
+    scan_mode: str | None = None
+    scan_scope: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

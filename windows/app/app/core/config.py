@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     tmdb_api_token: str | None = None
     poster_width: int = 500
     max_probe_seconds: int = 45
+    deep_probe_standard_seconds: int = 12
+    deep_probe_retry_seconds: int = 30
+    deep_analysis_version: int = 2
     max_mediainfo_seconds: int = 8
     probe_workers: int = 4
     discovery_workers: int = 8
@@ -46,3 +49,4 @@ settings = Settings()
 settings.data_dir.mkdir(parents=True, exist_ok=True)
 (settings.data_dir / "posters").mkdir(parents=True, exist_ok=True)
 (settings.data_dir / "scan-events").mkdir(parents=True, exist_ok=True)
+(settings.data_dir / "deep-queues").mkdir(parents=True, exist_ok=True)

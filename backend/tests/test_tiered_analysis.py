@@ -44,38 +44,60 @@ def test_quick_scan_never_runs_ffprobe_when_mediainfo_succeeds(monkeypatch):
     assert result["analysis_mode"] == "quick"
 
 
-def test_deep_scan_skips_ffprobe_when_mediainfo_is_complete(monkeypatch):
-    monkeypatch.setattr(scanner_module, "analyze_media_quick", lambda *_: (complete_quick_result(), None))
+def test_deep_scan_uses_standard_ffprobe_without_mediainfo(monkeypatch):
+    def forbidden_mediainfo(*_args, **_kwargs):
+        raise AssertionError("Deep analysis should not pay the MediaInfo SMB timeout first")
 
-    def forbidden_probe(*_args, **_kwargs):
-        raise AssertionError("ffprobe should not run when MediaInfo has all core fields")
-
-    monkeypatch.setattr(scanner_module, "probe_media", forbidden_probe)
-    result, error = ScanManager._analyze_file(candidate(), mode="deep")
-
-    assert error is None
-    assert result["analysis_source"] == "mediainfo"
-    assert result["analysis_mode"] == "deep"
-
-
-def test_deep_scan_uses_ffprobe_only_for_missing_fields(monkeypatch):
-    quick = complete_quick_result()
-    quick["audio_channels"] = None
-    monkeypatch.setattr(scanner_module, "analyze_media_quick", lambda *_: (quick, None))
+    monkeypatch.setattr(scanner_module, "analyze_media_quick", forbidden_mediainfo)
     monkeypatch.setattr(
         scanner_module,
         "probe_media",
-        lambda *_: ({"audio_channels": 8, "audio_codec": "truehd", "raw": {"streams": []}}, None),
+        lambda *_args, profile="standard", **_kwargs: (complete_quick_result() | {"probe_profile": profile}, None),
     )
 
     result, error = ScanManager._analyze_file(candidate(), mode="deep")
 
     assert error is None
-    assert result["analysis_source"] == "mediainfo+ffprobe"
+    assert result["analysis_source"] == "ffprobe-standard"
     assert result["analysis_mode"] == "deep"
+    assert result["analysis_profile"] == "standard"
+
+
+def test_deep_scan_escalates_only_after_partial_standard_success(monkeypatch):
+    calls = []
+
+    def probe(*_args, profile="standard", **_kwargs):
+        calls.append(profile)
+        if profile == "standard":
+            result = complete_quick_result()
+            result["audio_channels"] = None
+            return result, None
+        return {"audio_channels": 8, "audio_codec": "truehd", "raw": {"streams": []}}, None
+
+    monkeypatch.setattr(scanner_module, "probe_media", probe)
+    result, error = ScanManager._analyze_file(candidate(), mode="deep")
+
+    assert error is None
+    assert calls == ["standard", "extended"]
+    assert result["analysis_source"] == "ffprobe-extended"
+    assert result["analysis_profile"] == "extended"
     assert result["audio_channels"] == 8
-    # MediaInfo remains authoritative for fields it already supplied.
     assert result["audio_codec"] == "eac3"
+
+
+def test_deep_timeout_is_deferred_without_extended_retry(monkeypatch):
+    calls = []
+
+    def timeout(*_args, profile="standard", **_kwargs):
+        calls.append(profile)
+        return {}, "ffprobe standard timed out after 12 seconds"
+
+    monkeypatch.setattr(scanner_module, "probe_media", timeout)
+    result, error = ScanManager._analyze_file(candidate(), mode="deep")
+
+    assert calls == ["standard"]
+    assert error and "timed out" in error
+    assert result["analysis_status"] == "deferred"
 
 
 def test_quick_cache_is_reused_but_deep_scan_upgrades_it():
@@ -157,3 +179,38 @@ def test_circuit_breaker_caps_simultaneous_timeout_attempts(monkeypatch):
         [future.result() for future in futures]
 
     assert calls["count"] == 4
+
+
+def test_deep_scope_selection_uses_cached_failure_and_missing_fields():
+    from types import SimpleNamespace
+    from app.models import MediaFile
+
+    record = MediaFile(
+        movie_id="movie",
+        source_file_id="file",
+        path="Movie.mkv",
+        filename="Movie.mkv",
+        fingerprint="same",
+        container="matroska",
+        duration_seconds=7200,
+        video_codec="hevc",
+        width=3840,
+        height=2160,
+        resolution_label="4K",
+        audio_codec="eac3",
+        audio_channels=6,
+        probe_json='{"_reelindex":{"mode":"deep","source":"ffprobe-standard","status":"complete"}}',
+    )
+    candidate_obj = SimpleNamespace(filename="Movie.2160p.HDR10.mkv")
+
+    assert not ScanManager._should_queue_deep(record, candidate_obj, "incomplete", True)
+    assert ScanManager._should_queue_deep(record, candidate_obj, "4k", True)
+    assert ScanManager._should_queue_deep(record, candidate_obj, "all", True)
+
+    record.probe_error = "ffprobe standard timed out"
+    record.probe_json = '{"_reelindex":{"mode":"deep","status":"deferred"}}'
+    assert ScanManager._should_queue_deep(record, candidate_obj, "failed", True)
+
+    record.probe_error = None
+    record.audio_channels = None
+    assert ScanManager._should_queue_deep(record, candidate_obj, "missing", True)

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -22,6 +23,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.security import reveal_config
 from app.models import MediaFile, Movie, ScanRun, Source
+from app.services.deep_queue import deep_queue_store
 from app.services.media_utils import sort_title
 from app.services.mediainfo import MediaInfoCancelled, analyze_media_quick
 from app.services.probe import ProbeCancelled, probe_media
@@ -121,9 +123,15 @@ class ScanManager:
         self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
-    def start(self, source_id: str, mode: str = "quick") -> str:
+    DEEP_SCOPES = {"incomplete", "failed", "missing", "4k", "all"}
+
+    def start(self, source_id: str, mode: str = "quick", scope: str = "incomplete") -> str:
         if mode not in {"quick", "deep"}:
             raise ValueError("Scan mode must be quick or deep")
+        if scope not in self.DEEP_SCOPES:
+            raise ValueError("Unsupported deep-scan scope")
+        if mode == "quick":
+            scope = "incomplete"
         with self._lock:
             if source_id in self._active:
                 return self._active[source_id]
@@ -143,17 +151,52 @@ class ScanManager:
             run_id,
             "info",
             "queue",
-            f"{mode.title()} scan queued",
+            f"{mode.title()} scan queued" + (f" · {scope}" if mode == "deep" else ""),
             source_id=source_id,
             mode=mode,
+            scope=scope,
         )
+        self._launch(self._run_scan, source_id, run_id, mode, scope)
+        return run_id
+
+    def resume(self, run_id: str) -> str:
+        manifest = deep_queue_store.load(run_id)
+        if not manifest or not manifest.get("pending"):
+            raise ValueError("No resumable deep-analysis queue exists")
+        source_id = str(manifest.get("source_id") or "")
+        with self._lock:
+            if source_id in self._active:
+                return self._active[source_id]
+            with SessionLocal() as db:
+                source = db.get(Source, source_id)
+                run = db.get(ScanRun, run_id)
+                if not source or not run:
+                    raise ValueError("Source or scan run no longer exists")
+                run.status = "queued"
+                run.current_item = f"Resuming deep analysis · {len(manifest.get('pending') or []):,} files remaining"
+                run.completed_at = None
+                run.error_message = None
+                db.commit()
+            self._active[source_id] = run_id
+            self._cancel_events[run_id] = threading.Event()
+        scan_event_store.append(
+            run_id,
+            "info",
+            "queue",
+            f"Resuming deep-analysis queue with {len(manifest.get('pending') or []):,} files",
+            mode="deep",
+            scope=manifest.get("scope") or "incomplete",
+        )
+        self._launch(self._run_resume, source_id, run_id)
+        return run_id
+
+    @staticmethod
+    def _launch(operation: Any, *args: Any) -> None:
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(asyncio.to_thread(self._run_scan, source_id, run_id, mode))
+            loop.create_task(asyncio.to_thread(operation, *args))
         except RuntimeError:
-            thread = threading.Thread(target=self._run_scan, args=(source_id, run_id, mode), daemon=True)
-            thread.start()
-        return run_id
+            threading.Thread(target=operation, args=args, daemon=True).start()
 
     def active_run(self, source_id: str) -> str | None:
         with self._lock:
@@ -224,20 +267,22 @@ class ScanManager:
                 return result
             raise result
 
-    def _run_scan(self, source_id: str, run_id: str, mode: str = "quick") -> None:
+    def _run_scan(self, source_id: str, run_id: str, mode: str = "quick", scope: str = "incomplete") -> None:
         with self._lock:
             cancel_event = self._cancel_events.get(run_id)
         if cancel_event is None:
             cancel_event = threading.Event()
         try:
-            self._execute_scan(source_id, run_id, cancel_event, mode)
+            self._execute_scan(source_id, run_id, cancel_event, mode, scope)
         except ScanCancelled:
-            scan_event_store.append(run_id, "warning", "complete", "Scan cancelled")
+            queue_info = deep_queue_store.info(run_id)
+            message = "Deep analysis paused; queue can be resumed" if queue_info["resumable"] else "Scan cancelled"
+            scan_event_store.append(run_id, "warning", "complete", message)
             with SessionLocal() as db:
                 run = db.get(ScanRun, run_id)
                 if run:
                     run.status = "cancelled"
-                    run.current_item = "Scan cancelled"
+                    run.current_item = "Deep analysis paused" if queue_info["resumable"] else "Scan cancelled"
                     run.completed_at = utcnow()
                     db.commit()
         except Exception as exc:
@@ -256,8 +301,40 @@ class ScanManager:
                     self._active.pop(source_id, None)
                 self._cancel_events.pop(run_id, None)
 
+    def _run_resume(self, source_id: str, run_id: str) -> None:
+        with self._lock:
+            cancel_event = self._cancel_events.get(run_id)
+        if cancel_event is None:
+            cancel_event = threading.Event()
+        try:
+            self._execute_resume(source_id, run_id, cancel_event)
+        except ScanCancelled:
+            scan_event_store.append(run_id, "warning", "complete", "Deep analysis paused; queue can be resumed")
+            with SessionLocal() as db:
+                run = db.get(ScanRun, run_id)
+                if run:
+                    run.status = "cancelled"
+                    run.current_item = "Deep analysis paused"
+                    run.completed_at = utcnow()
+                    db.commit()
+        except Exception as exc:
+            logger.exception("Deep-analysis resume failed for source %s", source_id)
+            scan_event_store.append(run_id, "error", "complete", f"Deep-analysis resume failed: {exc}")
+            with SessionLocal() as db:
+                run = db.get(ScanRun, run_id)
+                if run:
+                    run.status = "failed"
+                    run.error_message = str(exc)[:4000]
+                    run.completed_at = utcnow()
+                    db.commit()
+        finally:
+            with self._lock:
+                if self._active.get(source_id) == run_id:
+                    self._active.pop(source_id, None)
+                self._cancel_events.pop(run_id, None)
+
     def _execute_scan(
-        self, source_id: str, run_id: str, cancel_event: threading.Event, mode: str
+        self, source_id: str, run_id: str, cancel_event: threading.Event, mode: str, scope: str = "incomplete"
     ) -> None:
         self._raise_if_cancelled(cancel_event)
         scan_started = time.perf_counter()
@@ -279,9 +356,10 @@ class ScanManager:
             run_id,
             "info",
             "start",
-            f"Starting {mode} scan for {source_name}",
+            f"Starting {mode} scan for {source_name}" + (f" · scope={scope}" if mode == "deep" else ""),
             source_type=source_type,
             mode=mode,
+            scope=scope,
             verbose=verbose,
             discovery_workers=getattr(adapter, "discovery_workers", settings.discovery_workers),
             probe_workers=settings.probe_workers,
@@ -418,8 +496,9 @@ class ScanManager:
                         db.add(file_record)
                         db.flush()
                     seen_file_ids.add(file_record.id)
-                    unchanged = (
-                        file_record.fingerprint == file_candidate.fingerprint
+                    same_fingerprint = file_record.fingerprint == file_candidate.fingerprint
+                    cached_valid = (
+                        same_fingerprint
                         and not file_record.probe_error
                         and self._cached_analysis_satisfies(file_record.probe_json, mode)
                     )
@@ -431,21 +510,14 @@ class ScanManager:
                     file_record.edition = file_candidate.edition
                     file_record.active = True
 
-                    if unchanged:
-                        run.cached_count += 1
-                        if verbose:
-                            scan_event_store.append(
-                                run_id,
-                                "debug",
-                                "cache",
-                                f"Cache hit: {file_candidate.filename}",
-                            )
-                    elif self._has_server_technical(file_candidate.technical):
+                    if self._has_server_technical(file_candidate.technical):
                         # Plex/Jellyfin/Emby already provide the fields needed by the
                         # competition. Do not reopen every media file over the network.
                         server_technical = dict(file_candidate.technical)
                         server_technical["analysis_source"] = "media-server"
                         server_technical["analysis_mode"] = "deep"
+                        server_technical["analysis_status"] = "complete"
+                        server_technical["analysis_version"] = settings.deep_analysis_version
                         self._apply_technical(file_record, server_technical, None)
                         run.analyzed_count += 1
                         scan_event_store.append(
@@ -454,8 +526,21 @@ class ScanManager:
                             "analyze",
                             f"Used media-server metadata: {file_candidate.filename}",
                         )
-                    else:
+                    elif mode == "deep" and self._should_queue_deep(
+                        file_record, file_candidate, scope, same_fingerprint
+                    ):
                         probe_jobs.append(ProbeJob(file_record.id, file_candidate.filename, file_candidate))
+                    elif mode == "quick" and not cached_valid:
+                        probe_jobs.append(ProbeJob(file_record.id, file_candidate.filename, file_candidate))
+                    else:
+                        run.cached_count += 1
+                        if verbose:
+                            scan_event_store.append(
+                                run_id,
+                                "debug",
+                                "cache",
+                                f"Cache hit: {file_candidate.filename}",
+                            )
 
                     processed_files += 1
                     if processed_files % settings.scan_commit_interval == 0:
@@ -492,7 +577,27 @@ class ScanManager:
         )
 
         self._raise_if_cancelled(cancel_event)
-        self._run_probe_jobs(run_id, probe_jobs, cancel_event, mode, verbose=verbose)
+        if mode == "deep" and probe_jobs:
+            deep_queue_store.create(
+                run_id=run_id,
+                source_id=source_id,
+                record_ids=[job.record_id for job in probe_jobs],
+                scope=scope,
+                total_files=total_files,
+            )
+            scan_event_store.append(
+                run_id,
+                "info",
+                "deep-queue",
+                f"Persistent deep-analysis queue created with {len(probe_jobs):,} files",
+                queue_total=len(probe_jobs),
+                scope=scope,
+            )
+        self._run_probe_jobs(
+            run_id, probe_jobs, cancel_event, mode, verbose=verbose, persistent_queue=(mode == "deep")
+        )
+        if mode == "deep" and not cancel_event.is_set():
+            deep_queue_store.remove(run_id)
         self._raise_if_cancelled(cancel_event)
         self._fill_missing_runtimes(source_id, cancel_event)
         self._raise_if_cancelled(cancel_event)
@@ -515,6 +620,72 @@ class ScanManager:
             elapsed_ms=round((time.perf_counter() - scan_started) * 1000),
         )
 
+    def _execute_resume(
+        self, source_id: str, run_id: str, cancel_event: threading.Event
+    ) -> None:
+        manifest = deep_queue_store.load(run_id)
+        if not manifest:
+            raise ValueError("Deep-analysis queue is missing")
+        pending_ids = [str(item) for item in manifest.get("pending") or []]
+        if not pending_ids:
+            deep_queue_store.remove(run_id)
+            return
+
+        with SessionLocal() as db:
+            run = db.get(ScanRun, run_id)
+            if not run:
+                raise ValueError("Scan run no longer exists")
+            records = db.scalars(
+                select(MediaFile).where(
+                    MediaFile.id.in_(pending_ids),
+                    MediaFile.active.is_(True),
+                )
+            ).all()
+            by_id = {record.id: record for record in records}
+            jobs: list[ProbeJob] = []
+            for record_id in pending_ids:
+                record = by_id.get(record_id)
+                if not record:
+                    continue
+                candidate = SimpleNamespace(
+                    filename=record.filename,
+                    path=record.path,
+                    local_path=Path(record.path),
+                    size_bytes=record.size_bytes,
+                    modified_ts=record.modified_ts,
+                    fingerprint=record.fingerprint,
+                    edition=record.edition,
+                    technical={},
+                )
+                jobs.append(ProbeJob(record.id, record.filename, candidate))
+            deep_queue_store.keep_only(run_id, [job.record_id for job in jobs])
+            run.status = "running"
+            run.current_item = f"Resuming deep analysis · 0/{len(jobs):,}"
+            db.commit()
+
+        scan_event_store.append(
+            run_id,
+            "info",
+            "deep-queue",
+            f"Resumed persistent queue with {len(jobs):,} remaining files",
+            queue_remaining=len(jobs),
+            scope=manifest.get("scope") or "incomplete",
+        )
+        self._run_probe_jobs(
+            run_id, jobs, cancel_event, "deep", verbose=runtime_settings.verbose_scan_logging(), persistent_queue=True
+        )
+        self._raise_if_cancelled(cancel_event)
+        deep_queue_store.remove(run_id)
+        self._fill_missing_runtimes(source_id, cancel_event)
+        with SessionLocal() as db:
+            run = db.get(ScanRun, run_id)
+            if run:
+                run.status = "completed"
+                run.current_item = None
+                run.completed_at = utcnow()
+                db.commit()
+        scan_event_store.append(run_id, "success", "complete", "Resumed deep-analysis queue completed")
+
     def _run_probe_jobs(
         self,
         run_id: str,
@@ -522,6 +693,7 @@ class ScanManager:
         cancel_event: threading.Event,
         mode: str,
         verbose: bool = False,
+        persistent_queue: bool = False,
     ) -> None:
         if not jobs:
             scan_event_store.append(run_id, "info", "analyze", "No changed files require analysis")
@@ -584,13 +756,16 @@ class ScanManager:
                             self._apply_technical(record, technical, error)
                         if error:
                             run.error_count += 1
+                            outcome = "deferred" if "timed out" in error.lower() or "deferred" in error.lower() else "failed"
                             scan_event_store.append(
                                 run_id,
-                                "error",
+                                "warning" if outcome == "deferred" else "error",
                                 "analyze",
-                                f"Analysis warning for {job.filename}: {error}",
+                                f"Analysis {outcome} for {job.filename}: {error}",
+                                outcome=outcome,
                             )
                         else:
+                            outcome = "succeeded"
                             run.analyzed_count += 1
                             source = technical.get("analysis_source") or "analyzer"
                             scan_event_store.append(
@@ -599,6 +774,10 @@ class ScanManager:
                                 "analyze",
                                 f"Analyzed {job.filename} with {source}",
                             )
+                        if persistent_queue:
+                            queue_state = deep_queue_store.mark_complete(run_id, job.record_id, outcome)
+                        else:
+                            queue_state = None
                         if verbose:
                             scan_event_store.append(
                                 run_id,
@@ -607,7 +786,29 @@ class ScanManager:
                                 f"Analysis job finished in {queued_elapsed:.3f}s: {job.filename}",
                                 elapsed_ms=round(queued_elapsed * 1000),
                             )
-                        run.current_item = f"Analyzing · {completed:,}/{len(jobs):,} · {job.filename}"
+                        elapsed_stage = max(time.perf_counter() - stage_started, 0.001)
+                        average_seconds = elapsed_stage / completed
+                        remaining = len(jobs) - completed
+                        eta_seconds = round(average_seconds * remaining)
+                        run.current_item = (
+                            f"Deep analysis · {completed:,}/{len(jobs):,} · "
+                            f"{remaining:,} remaining · ETA {self._format_eta(eta_seconds)} · {job.filename}"
+                            if mode == "deep"
+                            else f"Analyzing · {completed:,}/{len(jobs):,} · {job.filename}"
+                        )
+                        if mode == "deep" and (completed == 1 or completed % 10 == 0 or completed == len(jobs)):
+                            scan_event_store.append(
+                                run_id,
+                                "info",
+                                "deep-queue",
+                                f"Deep analysis progress: {completed:,}/{len(jobs):,} · {remaining:,} remaining · ETA {self._format_eta(eta_seconds)}",
+                                completed=completed,
+                                remaining=remaining,
+                                total=len(jobs),
+                                average_ms=round(average_seconds * 1000),
+                                eta_seconds=eta_seconds,
+                                queue_remaining=len(queue_state.get("pending") or []) if queue_state else remaining,
+                            )
                         if completed % settings.scan_commit_interval == 0:
                             db.commit()
                 db.commit()
@@ -862,6 +1063,64 @@ class ScanManager:
         return any(technical.get(key) not in (None, "") for key in useful)
 
     @staticmethod
+    def _format_eta(seconds: int | float) -> str:
+        seconds = max(0, int(seconds))
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes, remaining = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes}m {remaining:02d}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes:02d}m"
+
+    @staticmethod
+    def _analysis_marker(probe_json: str | None) -> dict[str, Any]:
+        if not probe_json:
+            return {}
+        try:
+            payload = json.loads(probe_json)
+        except json.JSONDecodeError:
+            return {}
+        marker = payload.get("_reelindex", {}) if isinstance(payload, dict) else {}
+        return marker if isinstance(marker, dict) else {}
+
+    @staticmethod
+    def _should_queue_deep(
+        record: MediaFile, file_candidate: Any, scope: str, same_fingerprint: bool
+    ) -> bool:
+        marker = ScanManager._analysis_marker(record.probe_json)
+        status = str(marker.get("status") or "").lower()
+        missing = ScanManager._needs_deep_fallback(
+            {
+                "container": record.container,
+                "duration_seconds": record.duration_seconds,
+                "video_codec": record.video_codec,
+                "width": record.width,
+                "height": record.height,
+                "audio_codec": record.audio_codec,
+                "audio_channels": record.audio_channels,
+            }
+        )
+        if scope == "all":
+            return True
+        if scope == "failed":
+            return same_fingerprint and (bool(record.probe_error) or status in {"failed", "deferred"})
+        if scope == "missing":
+            return missing
+        if scope == "4k":
+            label = str(record.resolution_label or "").lower()
+            name = str(file_candidate.filename or "").lower()
+            return label == "4k" or bool(re.search(r"(?:2160p|\b4k\b|hdr10|dolby[ ._-]?vision|\bdv\b)", name))
+        # Incomplete/changed is the default competition-safe deep scan.
+        return (
+            not same_fingerprint
+            or bool(record.probe_error)
+            or missing
+            or not ScanManager._cached_analysis_satisfies(record.probe_json, "deep")
+            or status in {"failed", "deferred"}
+        )
+
+    @staticmethod
     def _cached_analysis_satisfies(probe_json: str, mode: str) -> bool:
         if not probe_json:
             return False
@@ -878,7 +1137,10 @@ class ScanManager:
             return True
         cached_mode = marker.get("mode")
         source = marker.get("source")
-        return cached_mode in {"deep", "server"} or source in {"ffprobe", "media-server", "mediainfo+ffprobe"}
+        status = marker.get("status")
+        if status in {"failed", "deferred"}:
+            return False
+        return cached_mode in {"deep", "server"} or source in {"ffprobe", "media-server", "mediainfo+ffprobe", "ffprobe-standard", "ffprobe-extended"}
 
     @staticmethod
     def _needs_deep_fallback(technical: dict[str, Any]) -> bool:
@@ -978,85 +1240,147 @@ class ScanManager:
         if not file_candidate.local_path:
             return finish({}, "Media file is not locally accessible and the server supplied no technical metadata")
 
-        quick: dict[str, Any] = {}
-        quick_error: str | None = None
-        media_attempt = mediainfo_circuit is None or mediainfo_circuit.begin_attempt()
-        if media_attempt:
-            event("info", "mediainfo", f"Reading headers: {file_candidate.filename}")
-            mediainfo_started = time.perf_counter()
-            try:
-                quick, quick_error = analyze_media_quick(file_candidate.local_path, cancel_event)
-            except BaseException:
-                if mediainfo_circuit:
-                    mediainfo_circuit.release_attempt()
-                raise
-            if verbose:
-                elapsed = time.perf_counter() - mediainfo_started
-                event("debug", "timing", f"MediaInfo {elapsed:.3f}s: {file_candidate.filename}")
-            if quick:
-                if mediainfo_circuit:
-                    mediainfo_circuit.record_success()
-                quick["analysis_source"] = "mediainfo"
-                quick["analysis_mode"] = mode
-                if mode == "quick" or not ScanManager._needs_deep_fallback(quick):
-                    return finish(quick, None)
-            elif mediainfo_circuit and mediainfo_circuit.record_error(quick_error):
-                event(
-                    "warning",
-                    "mediainfo",
-                    f"MediaInfo timed out on {mediainfo_circuit.threshold} files; skipping it for the rest of this scan",
-                )
-        else:
-            quick_error = "MediaInfo skipped after repeated timeouts in this scan"
-
-        # Quick means quick: never spend another 45 seconds on ffprobe when the
-        # lightweight analyzer fails. Cache a filesystem-only result so unchanged
-        # files are not retried on every subsequent Quick scan.
+        # Quick scan stays intentionally lightweight: MediaInfo gets one bounded
+        # header read and there is never an ffprobe escalation.
         if mode == "quick":
+            quick: dict[str, Any] = {}
+            quick_error: str | None = None
+            media_attempt = mediainfo_circuit is None or mediainfo_circuit.begin_attempt()
+            if media_attempt:
+                event("info", "mediainfo", f"Reading headers: {file_candidate.filename}")
+                mediainfo_started = time.perf_counter()
+                try:
+                    quick, quick_error = analyze_media_quick(file_candidate.local_path, cancel_event)
+                except BaseException:
+                    if mediainfo_circuit:
+                        mediainfo_circuit.release_attempt()
+                    raise
+                if verbose:
+                    elapsed = time.perf_counter() - mediainfo_started
+                    event("debug", "timing", f"MediaInfo {elapsed:.3f}s: {file_candidate.filename}")
+                if quick:
+                    if mediainfo_circuit:
+                        mediainfo_circuit.record_success()
+                    quick.update({
+                        "analysis_source": "mediainfo",
+                        "analysis_mode": "quick",
+                        "analysis_status": "complete",
+                        "analysis_version": settings.deep_analysis_version,
+                    })
+                    return finish(quick, None)
+                if mediainfo_circuit and mediainfo_circuit.record_error(quick_error):
+                    event(
+                        "warning",
+                        "mediainfo",
+                        f"MediaInfo timed out on {mediainfo_circuit.threshold} files; skipping it for the rest of this scan",
+                    )
+            else:
+                quick_error = "MediaInfo skipped after repeated timeouts in this scan"
             warning = quick_error or "MediaInfo returned incomplete metadata"
             event("warning", "analyze", f"Quick metadata fallback: {file_candidate.filename} ({warning})")
-            return finish(ScanManager._basic_file_technical(file_candidate, mode, warning), None)
+            technical = ScanManager._basic_file_technical(file_candidate, mode, warning)
+            technical.update({
+                "analysis_status": "complete",
+                "analysis_version": settings.deep_analysis_version,
+            })
+            return finish(technical, None)
 
-        # Deep scans may use ffprobe, but stop launching it after a full worker
-        # batch times out. FFmpeg documents probesize/analyzeduration as the knobs
-        # that control probe latency; probe.py uses conservative bounded values.
+        # Deep analysis goes straight to a bounded, minimal ffprobe query. This
+        # avoids paying the known MediaInfo SMB timeout before every deep probe.
         ffprobe_attempt = ffprobe_circuit is None or ffprobe_circuit.begin_attempt()
         if not ffprobe_attempt:
-            error = "ffprobe skipped after repeated timeouts in this scan"
-            return finish(quick or ScanManager._basic_file_technical(file_candidate, mode, error), error)
+            error = "Deep analysis deferred after repeated ffprobe timeouts in this scan"
+            technical = ScanManager._basic_file_technical(file_candidate, mode, error)
+            technical.update({
+                "analysis_status": "deferred",
+                "analysis_version": settings.deep_analysis_version,
+                "analysis_profile": "standard",
+            })
+            return finish(technical, error)
 
-        event("warning" if quick_error else "info", "ffprobe", f"Using ffprobe fallback: {file_candidate.filename}")
-        ffprobe_started = time.perf_counter()
+        event("info", "ffprobe", f"Standard deep probe: {file_candidate.filename}")
+        standard_started = time.perf_counter()
         try:
-            probed, probe_error = probe_media(file_candidate.local_path, cancel_event)
+            standard, standard_error = probe_media(
+                file_candidate.local_path, cancel_event, profile="standard"
+            )
         except BaseException:
             if ffprobe_circuit:
                 ffprobe_circuit.release_attempt()
             raise
         if verbose:
-            elapsed = time.perf_counter() - ffprobe_started
-            event("debug", "timing", f"ffprobe {elapsed:.3f}s: {file_candidate.filename}")
-        if probed:
+            elapsed = time.perf_counter() - standard_started
+            event("debug", "timing", f"ffprobe standard {elapsed:.3f}s: {file_candidate.filename}")
+
+        if not standard:
+            disabled = ffprobe_circuit.record_error(standard_error) if ffprobe_circuit else False
+            if disabled:
+                event(
+                    "warning",
+                    "ffprobe",
+                    f"ffprobe timed out on {ffprobe_circuit.threshold} files; deferring the remaining deep queue",
+                )
+            status = "deferred" if standard_error and "timed out" in standard_error.lower() else "failed"
+            technical = ScanManager._basic_file_technical(file_candidate, mode, standard_error)
+            technical.update({
+                "analysis_status": status,
+                "analysis_version": settings.deep_analysis_version,
+                "analysis_profile": "standard",
+            })
+            return finish(technical, standard_error)
+
+        if ffprobe_circuit:
+            ffprobe_circuit.record_success()
+        standard.update({
+            "analysis_source": "ffprobe-standard",
+            "analysis_mode": "deep",
+            "analysis_status": "complete",
+            "analysis_version": settings.deep_analysis_version,
+            "analysis_profile": "standard",
+        })
+        if not ScanManager._needs_deep_fallback(standard):
+            return finish(standard, None)
+
+        # Only a successful-but-incomplete standard probe is allowed to escalate.
+        # A timeout is never followed by another longer network probe.
+        extended_attempt = ffprobe_circuit is None or ffprobe_circuit.begin_attempt()
+        if not extended_attempt:
+            standard["analysis_warning"] = "Extended probe skipped after repeated timeouts"
+            return finish(standard, None)
+        event("info", "ffprobe", f"Extended deep probe for missing fields: {file_candidate.filename}")
+        extended_started = time.perf_counter()
+        try:
+            extended, extended_error = probe_media(
+                file_candidate.local_path, cancel_event, profile="extended"
+            )
+        except BaseException:
+            if ffprobe_circuit:
+                ffprobe_circuit.release_attempt()
+            raise
+        if verbose:
+            elapsed = time.perf_counter() - extended_started
+            event("debug", "timing", f"ffprobe extended {elapsed:.3f}s: {file_candidate.filename}")
+        if extended:
             if ffprobe_circuit:
                 ffprobe_circuit.record_success()
-            if quick:
-                technical = ScanManager._merge_technical(quick, probed)
-                technical["analysis_source"] = "mediainfo+ffprobe"
-            else:
-                technical = probed
-                technical["analysis_source"] = "ffprobe"
-            technical["analysis_mode"] = "deep"
+            technical = ScanManager._merge_technical(standard, extended)
+            technical.update({
+                "analysis_source": "ffprobe-extended",
+                "analysis_mode": "deep",
+                "analysis_status": "complete",
+                "analysis_version": settings.deep_analysis_version,
+                "analysis_profile": "extended",
+            })
             return finish(technical, None)
-        if ffprobe_circuit and ffprobe_circuit.record_error(probe_error):
-            event(
-                "warning",
-                "ffprobe",
-                f"ffprobe timed out on {ffprobe_circuit.threshold} files; skipping it for the rest of this scan",
-            )
-        return finish(quick or ScanManager._basic_file_technical(file_candidate, mode, probe_error), probe_error or quick_error)
+
+        if ffprobe_circuit:
+            ffprobe_circuit.record_error(extended_error)
+        standard["analysis_warning"] = extended_error
+        return finish(standard, None)
 
     @staticmethod
     def _apply_technical(record: MediaFile, technical: dict[str, Any], error: str | None) -> None:
+        previous = ScanManager._analysis_marker(record.probe_json)
         record.container = technical.get("container")
         record.duration_seconds = technical.get("duration_seconds")
         record.video_codec = technical.get("video_codec")
@@ -1067,12 +1391,21 @@ class ScanManager:
         record.audio_codec = technical.get("audio_codec")
         record.audio_channels = technical.get("audio_channels")
         record.audio_languages = technical.get("audio_languages")
+        status = technical.get("analysis_status") or (
+            "deferred" if error and "timed out" in error.lower() else "failed" if error else "complete"
+        )
         payload = {
             "_reelindex": {
                 "source": technical.get("analysis_source") or "unknown",
                 "mode": technical.get("analysis_mode") or "unknown",
+                "status": status,
+                "version": technical.get("analysis_version") or settings.deep_analysis_version,
+                "profile": technical.get("analysis_profile") or technical.get("probe_profile"),
                 "warning": technical.get("analysis_warning"),
+                "attempt_count": int(previous.get("attempt_count") or 0) + 1,
+                "attempted_at": utcnow().isoformat(),
             },
+            "extended": technical.get("extended") or {},
             "raw": technical.get("raw", technical),
         }
         record.probe_json = json.dumps(payload, default=str)

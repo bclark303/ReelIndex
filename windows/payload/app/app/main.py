@@ -25,8 +25,9 @@ logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.I
 def recover_interrupted_scans() -> None:
     """Close scan rows left active by an application restart.
 
-    Scan worker state is in memory, so a row marked running cannot be resumed
-    after the Windows service is replaced or terminated.
+    Ordinary scan worker state is in memory. Deep-analysis manifests are stored
+    separately and remain resumable from the Sources page after this row is
+    marked interrupted.
     """
     with SessionLocal() as db:
         runs = db.scalars(
@@ -52,7 +53,7 @@ async def lifespan(app: FastAPI):
     scan_scheduler.shutdown()
 
 
-app = FastAPI(title=settings.app_name, version="1.2.4", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.3.0", lifespan=lifespan)
 
 
 @app.middleware("http")

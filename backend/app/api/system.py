@@ -17,6 +17,7 @@ from app.core.database import get_db
 from app.core.security import reveal_config, sanitize_config
 from app.models import MediaFile, Movie, ScanRun, Source
 from app.schemas.api import DiagnosticsOut
+from app.services.deep_queue import deep_queue_store
 from app.services.maintenance import MaintenanceBlocked, reset_application_data
 from app.services.mediainfo import mediainfo_version
 from app.services.probe import ffprobe_version
@@ -44,7 +45,7 @@ def _maintenance_reset(*, confirmation: str, expected: str, include_sources: boo
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "app": settings.app_name, "version": "1.2.4"}
+    return {"status": "ok", "app": settings.app_name, "version": "1.3.0"}
 
 
 @router.get("/posters/{movie_id}")
@@ -65,7 +66,7 @@ def _diagnostics(db: Session) -> dict:
     scans = db.scalars(select(ScanRun).order_by(ScanRun.started_at.desc()).limit(20)).all()
     disk = shutil.disk_usage(settings.data_dir)
     return {
-        "app": {"name": settings.app_name, "version": "1.2.4", "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
+        "app": {"name": settings.app_name, "version": "1.3.0", "demo_mode": settings.demo_mode, "data_dir": str(settings.data_dir)},
         "system": {
             "platform": platform.platform(),
             "python": platform.python_version(),
@@ -73,6 +74,9 @@ def _diagnostics(db: Session) -> dict:
             "ffprobe": ffprobe_version(),
             "cpu_count": os.cpu_count(),
             "discovery_workers": settings.discovery_workers,
+            "probe_workers": settings.probe_workers,
+            "deep_standard_timeout": settings.deep_probe_standard_seconds,
+            "deep_retry_timeout": settings.deep_probe_retry_seconds,
             "data_disk_total": disk.total,
             "data_disk_free": disk.free,
         },
@@ -107,6 +111,7 @@ def _diagnostics(db: Session) -> dict:
                 "started_at": run.started_at.isoformat(),
                 "completed_at": run.completed_at.isoformat() if run.completed_at else None,
                 "error_message": run.error_message,
+                **deep_queue_store.info(run.id),
             }
             for run in scans
         ],

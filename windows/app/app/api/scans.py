@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models import ScanRun, Source
 from app.schemas.api import ScanRunOut
+from app.services.deep_queue import deep_queue_store
 from app.services.scanner import scan_manager
 from app.services.scan_events import scan_event_store
 
@@ -16,6 +17,7 @@ router = APIRouter(prefix="/scans", tags=["scans"])
 
 
 def _out(run: ScanRun, source_name: str | None = None) -> ScanRunOut:
+    queue = deep_queue_store.info(run.id)
     return ScanRunOut(
         id=run.id,
         source_id=run.source_id,
@@ -29,6 +31,7 @@ def _out(run: ScanRun, source_name: str | None = None) -> ScanRunOut:
         error_message=run.error_message,
         started_at=run.started_at,
         completed_at=run.completed_at,
+        **queue,
     )
 
 
@@ -36,17 +39,32 @@ def _out(run: ScanRun, source_name: str | None = None) -> ScanRunOut:
 def start_scan(
     source_id: str,
     mode: Literal["quick", "deep"] = "quick",
+    scope: Literal["incomplete", "failed", "missing", "4k", "all"] = "incomplete",
     db: Session = Depends(get_db),
 ):
     source = db.get(Source, source_id)
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        run_id = scan_manager.start(source_id, mode=mode)
+        run_id = scan_manager.start(source_id, mode=mode, scope=scope)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     run = db.get(ScanRun, run_id)
     return _out(run, source.name)
+
+
+@router.post("/{run_id}/resume", response_model=ScanRunOut, status_code=status.HTTP_202_ACCEPTED)
+def resume_scan(run_id: str, db: Session = Depends(get_db)):
+    run = db.get(ScanRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    try:
+        scan_manager.resume(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.refresh(run)
+    source = db.get(Source, run.source_id)
+    return _out(run, source.name if source else None)
 
 
 @router.post("/{run_id}/cancel", response_model=ScanRunOut, status_code=status.HTTP_202_ACCEPTED)
