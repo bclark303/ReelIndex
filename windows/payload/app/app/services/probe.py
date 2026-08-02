@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,37 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+def _hidden_process_options() -> dict[str, Any]:
+    """Return subprocess options that keep ffprobe invisible on Windows.
+
+    ReelIndex is launched with pythonw.exe, so child console applications such
+    as ffprobe must explicitly be created without a console window. Both flags
+    are used because CREATE_NO_WINDOW prevents allocation while STARTF_USESHOWWINDOW
+    also covers Windows environments that otherwise flash a console briefly.
+    """
+    if os.name != "nt":
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+        "startupinfo": startupinfo,
+    }
+
+
+def _run_hidden(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        **_hidden_process_options(),
+    )
+
+
 def probe_media(path: Path) -> tuple[dict[str, Any], str | None]:
     command = [
         settings.ffprobe_path,
@@ -35,7 +67,7 @@ def probe_media(path: Path) -> tuple[dict[str, Any], str | None]:
         str(path),
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=settings.max_probe_seconds, check=False)
+        result = _run_hidden(command, settings.max_probe_seconds)
     except FileNotFoundError:
         return {}, "ffprobe is not installed"
     except subprocess.TimeoutExpired:
@@ -75,7 +107,7 @@ def probe_media(path: Path) -> tuple[dict[str, Any], str | None]:
 
 def ffprobe_version() -> str:
     try:
-        result = subprocess.run([settings.ffprobe_path, "-version"], capture_output=True, text=True, timeout=5, check=False)
+        result = _run_hidden([settings.ffprobe_path, "-version"], 5)
         return result.stdout.splitlines()[0] if result.stdout else "unknown"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return "unavailable"

@@ -103,3 +103,10 @@ For a mapped network drive, ReelIndex must be launched under the same Windows ac
 - The Library and Sources pages refresh during active scans, so results appear progressively.
 
 The first filesystem scan still has to read every directory and inspect every media file. Later scans reuse cached technical metadata whenever file size and modification time have not changed.
+
+Version 1.1.1
+- Runs ffprobe with Windows CREATE_NO_WINDOW/hidden startup flags, preventing a console window for each movie.
+- Recognizes local poster, folder, cover, movie, front, and thumb artwork in JPG, JPEG, PNG, and WebP formats.
+- Recognizes filename-matched artwork such as Movie-poster.jpg and Movie.poster.png.
+- Reads movie.nfo and filename-matched Kodi/Jellyfin NFO sidecars for title, year, runtime, plot, edition, and unique IDs.
+- Reads movie.json, metadata.json, and filename-matched JSON sidecars.

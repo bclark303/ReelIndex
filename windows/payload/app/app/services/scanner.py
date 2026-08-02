@@ -180,7 +180,12 @@ class ScanManager:
                 movie.active = True
 
                 destination = settings.data_dir / "posters" / source_id / f"{movie.id}.jpg"
-                if destination.exists() and destination.stat().st_size > 100:
+                local_poster = candidate.metadata.get("origin") == "filesystem" and bool(candidate.poster_ref)
+                if local_poster:
+                    # A local sidecar is authoritative and should replace an older
+                    # TMDB/server cache on the next scan.
+                    poster_jobs.append(PosterJob(movie.id, candidate.title, candidate, destination))
+                elif destination.exists() and destination.stat().st_size > 100:
                     movie.poster_path = str(destination)
                 elif candidate.poster_ref or tmdb_token:
                     poster_jobs.append(PosterJob(movie.id, candidate.title, candidate, destination))
@@ -327,6 +332,9 @@ class ScanManager:
 
     @staticmethod
     def _fetch_poster(adapter: Any, candidate: Any, destination: Path, tmdb_token: str | None) -> PosterResult:
+        local_poster = candidate.metadata.get("origin") == "filesystem" and bool(candidate.poster_ref)
+        if local_poster and adapter.fetch_poster(candidate, destination):
+            return PosterResult(True)
         try:
             if destination.exists() and destination.stat().st_size > 100:
                 return PosterResult(True)
