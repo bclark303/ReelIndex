@@ -152,9 +152,9 @@ python -m pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The v1.4.9 validation gate runs the complete backend suite, an amd64 Docker
-smoke test, the bundled Windows runtime smoke test, and a Microsoft Defender
-scan of both the unpacked payload and final setup executable.
+The v1.4.9 validation gate passed all 97 backend tests, an amd64 Docker smoke
+test, the bundled Windows runtime smoke test, and a Microsoft Defender scan of
+both the unpacked payload and final setup executable.
 
 ## Privacy and safety
 
