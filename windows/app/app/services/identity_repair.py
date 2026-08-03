@@ -111,6 +111,12 @@ def apply_identity_repair() -> None:
             movie = self.movie_keys.get(key)
             if movie is not None:
                 return movie, None
+
+        # Exact source aliases remain authoritative when no better compatible
+        # canonical record exists. This preserves manual metadata and avoids
+        # inserting a duplicate row with the same legacy source identity.
+        if source_link:
+            return source_link.movie, source_link
         return None, None
 
     def repaired_ensure_movie_link(
@@ -156,6 +162,13 @@ def apply_identity_repair() -> None:
         key = (source_id, str(source_file_id))
         existing = self.source_files.get(key)
         old_file = existing.media_file if existing else None
+
+        # Move the ORM relationship before the old file is deleted. Updating
+        # only media_file_id leaves the relationship attached to the old parent,
+        # allowing delete-orphan cascading to delete the source link itself.
+        if existing is not None and old_file is not None and old_file.id != media_file.id:
+            existing.media_file = media_file
+
         link = original_ensure_file_link(
             self,
             media_file,
