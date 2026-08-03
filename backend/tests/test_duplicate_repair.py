@@ -112,6 +112,7 @@ def test_corrected_filesystem_alias_moves_to_compatible_canonical_movie(tmp_path
         )
         db.add_all([malformed_file, canonical_file])
         db.flush()
+        malformed_file_id = malformed_file.id
         filesystem_file_link = MediaFileSource(
             source_id=filesystem.id,
             media_file_id=malformed_file.id,
@@ -174,7 +175,7 @@ def test_corrected_filesystem_alias_moves_to_compatible_canonical_movie(tmp_path
         db.refresh(file_link)
         assert malformed.active is False
         assert file_link.media_file_id == canonical_file.id
-        assert db.get(MediaFile, malformed_file.id) is None
+        assert db.get(MediaFile, malformed_file_id) is None
         assert db.scalar(select(func.count(Movie.id)).where(Movie.active.is_(True))) == 1
 
     engine.dispose()
