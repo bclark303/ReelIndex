@@ -1,5 +1,6 @@
 name: Temporary duplicate repair
 
+# One-time validation runner for PR #12.
 on:
   push:
     branches: [main]
