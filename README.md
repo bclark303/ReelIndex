@@ -5,7 +5,7 @@ Docker, and Unraid**. It indexes movie libraries from local folders, mapped
 or mounted paths, UNC/SMB shares, Plex, Jellyfin, or Emby and presents
 searchable poster and table views with technical media details.
 
-The Windows and Docker/Unraid editions use the same v1.4.9 FastAPI backend and
+The Windows and Docker/Unraid editions use the same v1.4.10 FastAPI backend and
 browser interface.
 
 ![ReelIndex library](docs/images/library.png)
@@ -13,11 +13,11 @@ browser interface.
 ## Download for Windows
 
 Download the fully offline Windows package from
-[`dist/ReelIndex-Windows-Setup-v1.4.9.0.exe`](dist/ReelIndex-Windows-Setup-v1.4.9.0.exe).
+[`dist/ReelIndex-Windows-Setup-v1.4.10.0.exe`](dist/ReelIndex-Windows-Setup-v1.4.10.0.exe).
 Its Microsoft Defender release-gate record is published beside it at
-[`dist/ReelIndex-Windows-Setup-v1.4.9.0.defender.json`](dist/ReelIndex-Windows-Setup-v1.4.9.0.defender.json).
+[`dist/ReelIndex-Windows-Setup-v1.4.10.0.defender.json`](dist/ReelIndex-Windows-Setup-v1.4.10.0.defender.json).
 
-Windows Setup package 1.4.9.0 contains ReelIndex application version 1.4.9. The
+Windows Setup package 1.4.10.0 contains ReelIndex application version 1.4.10. The
 installer bundles the Python runtime and Python dependencies, performs no
 network access or PowerShell execution on the user device, and verifies an
 embedded SHA-256 manifest before installing files.
@@ -41,7 +41,7 @@ current Windows user.
 The published image is:
 
 ```text
-ghcr.io/bclark303/reelindex:1.4.9
+ghcr.io/bclark303/reelindex:1.4.10
 ```
 
 Start it with the included Compose file:
@@ -74,6 +74,18 @@ library mappings, PUID/PGID handling, and v1.0.3 upgrade guidance.
 - Scheduled scans, live progress, structured logs, and diagnostics
 - Global canonical movie/file identities across filesystem, Plex, Jellyfin, and Emby scans
 - Post-scan duplicate reconciliation and repaired parsing for punctuation-bearing movie titles
+- Safe per-movie inventory record deletion for rebuilding legacy bad groupings without touching media files or sidecars
+
+## Repairing an incorrectly grouped record
+
+Open the movie details, find **Inventory repair**, and choose **Delete inventory
+record**. ReelIndex removes the selected generated database record, its media
+inventory rows, and its source associations. It does not modify movie files,
+sidecars, source definitions, Plex, Jellyfin, or Emby.
+
+After deletion, run a Quick Scan for each source that contributed to the old
+record. The underlying movies are rediscovered using the current matching
+rules. Record deletion is blocked while any scan is active.
 
 ## Competition baseline and historical releases
 
@@ -152,14 +164,16 @@ python -m pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The v1.4.9 validation gate passed all 98 backend tests, an amd64 Docker smoke
-test, the bundled Windows runtime smoke test, and a Microsoft Defender scan of
-both the unpacked payload and final setup executable.
+The v1.4.10 validation gate includes 102 backend tests, an amd64 Docker smoke
+test with live DELETE-route validation, the bundled Windows runtime smoke test,
+and a Microsoft Defender scan of both the unpacked payload and final setup
+executable.
 
 ## Privacy and safety
 
 - Movie files and sidecars are opened read-only.
 - ReelIndex writes only to its application-data directory.
+- Per-movie record deletion removes only generated inventory state and ReelIndex-managed poster cache files.
 - Source tokens are encrypted before storage.
 - API responses and diagnostics mask stored credentials.
 - Do not upload database files, `.secret_key`, logs, cached posters, or `.env` files.
