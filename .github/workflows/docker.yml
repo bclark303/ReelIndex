@@ -25,6 +25,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Verify synchronized package copies
         run: python scripts/sync-packages.py --check
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - name: Install backend test dependencies
+        working-directory: backend
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+      - name: Run full backend test suite
+        working-directory: backend
+        env:
+          REELINDEX_DATA_DIR: ${{ runner.temp }}/reelindex-test-data
+        run: pytest -q
       - name: Build amd64 smoke image
         run: docker build --pull --tag reelindex:smoke .
       - name: Start smoke container
@@ -69,13 +82,13 @@ jobs:
           scans = json.load(open('scans.json', encoding='utf-8'))
           stats = json.load(open('stats.json', encoding='utf-8'))
           assert health['status'] == 'ok', health
-          assert health['version'] == '1.4.8', health
+          assert health['version'] == '1.4.9', health
           assert health['edition'] == 'Docker / Unraid', health
           assert isinstance(scans, list), scans
           assert isinstance(stats, dict), stats
           PY
           docker exec reelindex-smoke python -c "import sqlite3; db=sqlite3.connect('/data/reelindex.db'); tables={row[0] for row in db.execute(\"select name from sqlite_master where type='table'\")}; required={'sources','movies','movie_sources','media_files','media_file_sources','scan_runs'}; missing=required-tables; assert not missing, missing; mode=db.execute('pragma journal_mode').fetchone()[0].lower(); assert mode == 'delete', mode"
-          curl --fail --silent --show-error http://127.0.0.1:18080/ | grep -q 'ReelIndex 1.4.8'
+          curl --fail --silent --show-error http://127.0.0.1:18080/ | grep -q 'ReelIndex 1.4.9'
           docker exec reelindex-smoke ffprobe -version
           docker exec reelindex-smoke mediainfo --Version
           test -f "${RUNNER_TEMP}/reelindex-data/reelindex.db"

@@ -1,17 +1,21 @@
-name: Backend tests
+name: Backend test suite
 
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: backend-tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      REELINDEX_DATA_DIR: ${{ runner.temp }}/reelindex-test-data
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,6 +28,8 @@ jobs:
       - name: Install dependencies
         working-directory: backend
         run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
-      - name: Run tests
+      - name: Run full backend suite
         working-directory: backend
+        env:
+          REELINDEX_DATA_DIR: ${{ runner.temp }}/reelindex-test-data
         run: pytest -q

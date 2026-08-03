@@ -5,7 +5,7 @@ Docker, and Unraid**. It indexes movie libraries from local folders, mapped
 or mounted paths, UNC/SMB shares, Plex, Jellyfin, or Emby and presents
 searchable poster and table views with technical media details.
 
-The Windows and Docker/Unraid editions use the same v1.4.8 FastAPI backend and
+The Windows and Docker/Unraid editions use the same v1.4.9 FastAPI backend and
 browser interface.
 
 ![ReelIndex library](docs/images/library.png)
@@ -13,11 +13,11 @@ browser interface.
 ## Download for Windows
 
 Download the fully offline Windows package from
-[`dist/ReelIndex-Windows-Setup-v1.4.8.2.exe`](dist/ReelIndex-Windows-Setup-v1.4.8.2.exe).
+[`dist/ReelIndex-Windows-Setup-v1.4.9.0.exe`](dist/ReelIndex-Windows-Setup-v1.4.9.0.exe).
 Its Microsoft Defender release-gate record is published beside it at
-[`dist/ReelIndex-Windows-Setup-v1.4.8.2.defender.json`](dist/ReelIndex-Windows-Setup-v1.4.8.2.defender.json).
+[`dist/ReelIndex-Windows-Setup-v1.4.9.0.defender.json`](dist/ReelIndex-Windows-Setup-v1.4.9.0.defender.json).
 
-Windows Setup package 1.4.8.2 contains ReelIndex application version 1.4.8. The
+Windows Setup package 1.4.9.0 contains ReelIndex application version 1.4.9. The
 installer bundles the Python runtime and Python dependencies, performs no
 network access or PowerShell execution on the user device, and verifies an
 embedded SHA-256 manifest before installing files.
@@ -41,7 +41,7 @@ current Windows user.
 The published image is:
 
 ```text
-ghcr.io/bclark303/reelindex:1.4.8
+ghcr.io/bclark303/reelindex:1.4.9
 ```
 
 Start it with the included Compose file:
@@ -72,6 +72,8 @@ library mappings, PUID/PGID handling, and v1.0.3 upgrade guidance.
 - Probe Failures workspace with diagnosis and targeted native, extended, or ffprobe retries
 - Encrypted stored source credentials
 - Scheduled scans, live progress, structured logs, and diagnostics
+- Global canonical movie/file identities across filesystem, Plex, Jellyfin, and Emby scans
+- Post-scan duplicate reconciliation and repaired parsing for punctuation-bearing movie titles
 
 ## Competition baseline and historical releases
 
@@ -150,8 +152,9 @@ python -m pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The v1.4.5 validation run passed all 82 backend tests and an upgrade test using
-v1.0.3 appdata. See [`docs/VALIDATION-v1.4.5.md`](docs/VALIDATION-v1.4.5.md).
+The v1.4.9 validation gate passed all 98 backend tests, an amd64 Docker smoke
+test, the bundled Windows runtime smoke test, and a Microsoft Defender scan of
+both the unpacked payload and final setup executable.
 
 ## Privacy and safety
 

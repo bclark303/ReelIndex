@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,7 @@ from typing import Any
 from app.core.config import settings
 
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9-]{1,80}$")
+logger = logging.getLogger(__name__)
 
 
 def _utc_iso() -> str:
@@ -29,6 +32,7 @@ class ScanEventStore:
         self.directory.mkdir(parents=True, exist_ok=True)
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._reconcile_lock = threading.Lock()
 
     def _path(self, run_id: str) -> Path:
         if not _SAFE_RUN_ID.fullmatch(run_id):
@@ -53,21 +57,25 @@ class ScanEventStore:
         for old in files[max(retain - 1, 0):]:
             old.unlink(missing_ok=True)
 
-    def append(
+    def _append_event(
         self,
         run_id: str,
         level: str,
         stage: str,
         message: str,
-        **details: Any,
+        details: dict[str, Any] | None = None,
     ) -> None:
-        event = {
+        event: dict[str, Any] = {
             "timestamp": _utc_iso(),
             "level": level,
             "stage": stage,
             "message": " ".join(str(message).splitlines()).strip(),
         }
-        clean_details = {key: value for key, value in details.items() if value is not None}
+        clean_details = {
+            key: value
+            for key, value in (details or {}).items()
+            if value is not None
+        }
         if clean_details:
             event["details"] = clean_details
         encoded = (json.dumps(event, ensure_ascii=False, default=str) + "\n").encode("utf-8")
@@ -77,6 +85,59 @@ class ScanEventStore:
             with path.open("ab") as handle:
                 handle.write(encoded)
                 handle.flush()
+
+    def _reconcile_completed_run(self, run_id: str) -> None:
+        """Merge duplicates after a scan has refreshed filenames and byte sizes."""
+
+        started = time.perf_counter()
+        try:
+            from app.core.database import SessionLocal
+            from app.models import ScanRun
+            from app.services.library_identity import consolidate_existing_duplicates
+
+            with self._reconcile_lock:
+                with SessionLocal() as db:
+                    run = db.get(ScanRun, run_id)
+                    if not run or run.status != "completed":
+                        return
+                    merged = consolidate_existing_duplicates(db)
+                    db.commit()
+            elapsed = time.perf_counter() - started
+            self._append_event(
+                run_id,
+                "success" if merged else "info",
+                "reconcile",
+                (
+                    f"Canonical reconciliation merged {merged:,} duplicate movie entries "
+                    f"in {elapsed:.2f}s"
+                    if merged
+                    else f"Canonical reconciliation found no mergeable duplicates in {elapsed:.2f}s"
+                ),
+                {
+                    "merged_movies": merged,
+                    "elapsed_ms": round(elapsed * 1000),
+                },
+            )
+        except Exception as exc:  # A repair warning must not turn a good scan into a failed scan.
+            logger.exception("Post-scan canonical reconciliation failed for run %s", run_id)
+            self._append_event(
+                run_id,
+                "warning",
+                "reconcile",
+                f"Canonical reconciliation could not complete: {exc}",
+            )
+
+    def append(
+        self,
+        run_id: str,
+        level: str,
+        stage: str,
+        message: str,
+        **details: Any,
+    ) -> None:
+        self._append_event(run_id, level, stage, message, details)
+        if stage == "complete":
+            self._reconcile_completed_run(run_id)
 
     def read(
         self,
