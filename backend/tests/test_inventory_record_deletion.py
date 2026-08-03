@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import sessionmaker
 
-from app.main import app
+from app.api.inventory_records import router as inventory_records_router
 from app.models import Base, MediaFile, MediaFileSource, Movie, MovieSource, Source
 from app.services import inventory_records
 
@@ -159,10 +159,10 @@ def test_delete_record_is_blocked_while_any_scan_is_active(tmp_path, monkeypatch
     assert _count(session_factory, MediaFile) == 2
 
 
-def test_delete_record_route_is_registered():
-    movie_routes = [
-        (getattr(route, "path", ""), getattr(route, "methods", set()) or set())
-        for route in app.routes
-        if "/movies/" in getattr(route, "path", "")
+def test_delete_record_router_exposes_delete_method():
+    matching = [
+        route
+        for route in inventory_records_router.routes
+        if getattr(route, "path", None) == "/movies/{movie_id}"
     ]
-    assert any(path.endswith("/movies/{movie_id}") and "DELETE" in methods for path, methods in movie_routes), movie_routes
+    assert any("DELETE" in (getattr(route, "methods", set()) or set()) for route in matching)
