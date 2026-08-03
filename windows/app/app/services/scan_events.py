@@ -118,7 +118,7 @@ class ScanEventStore:
                     "elapsed_ms": round(elapsed * 1000),
                 },
             )
-        except Exception as exc:
+        except Exception as exc:  # A repair warning must not turn a good scan into a failed scan.
             logger.exception("Post-scan canonical reconciliation failed for run %s", run_id)
             self._append_event(
                 run_id,
