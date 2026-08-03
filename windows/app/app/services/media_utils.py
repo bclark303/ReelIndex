@@ -19,10 +19,40 @@ NOISE_RE = re.compile(
     r"\b(?:2160p|1080p|720p|480p|4k|uhd|bluray|blu-ray|web[- .]?dl|webrip|hdr10\+?|dolby[ .]?vision|dv|x26[45]|h\.?26[45]|hevc|avc|remux|aac|dts(?:-hd)?|truehd|atmos|proper|repack)\b.*$",
     re.I,
 )
+_MEDIA_FILE_EXTENSIONS = {
+    ".mkv",
+    ".mp4",
+    ".m4v",
+    ".avi",
+    ".mov",
+    ".wmv",
+    ".asf",
+    ".ts",
+    ".m2ts",
+    ".mts",
+    ".webm",
+    ".mpg",
+    ".mpeg",
+}
+
+
+def _title_input_name(raw: str) -> str:
+    """Strip a real media extension without treating title punctuation as one.
+
+    ``Path('Dr. No (1962)').stem`` returns ``'Dr'`` because pathlib assumes
+    ``'. No (1962)'`` is a file extension. Filesystem scans also pass folder
+    names here, so only a recognized media suffix may be removed.
+    """
+
+    name = str(raw or "").replace("\\", "/").rsplit("/", 1)[-1]
+    suffix = Path(name).suffix.lower()
+    if suffix in _MEDIA_FILE_EXTENSIONS:
+        return name[: -len(suffix)]
+    return name
 
 
 def clean_title(raw: str) -> tuple[str, int | None, str | None]:
-    name = Path(raw).stem
+    name = _title_input_name(raw)
     name = re.sub(r"[._]+", " ", name)
     edition = None
     for pattern, label in EDITION_PATTERNS:
@@ -38,7 +68,7 @@ def clean_title(raw: str) -> tuple[str, int | None, str | None]:
     name = NOISE_RE.sub("", name)
     name = re.sub(r"[\[\](){}]", " ", name)
     name = re.sub(r"\s+", " ", name).strip(" -")
-    return (name or Path(raw).stem, year, edition)
+    return (name or _title_input_name(raw), year, edition)
 
 
 def normalized_movie_key(title: str, year: int | None) -> str:
