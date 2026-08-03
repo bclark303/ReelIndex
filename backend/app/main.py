@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
+from app.api.inventory_records import router as inventory_records_router
 from app.api.movies import router as movies_router
 from app.api.probes import router as probes_router
 from app.api.scans import router as scans_router
@@ -61,7 +62,7 @@ app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
 @app.middleware("http")
 async def prevent_stale_ui_assets(request: Request, call_next):
     response = await call_next(request)
-    if request.url.path in {"/", "/index.html", "/app.js", "/styles.css", "/windows.css", "/manifest.webmanifest"}:
+    if request.url.path in {"/", "/index.html", "/app.js", "/record-delete.js", "/styles.css", "/windows.css", "/manifest.webmanifest"}:
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -77,6 +78,7 @@ app.include_router(system_router, prefix=settings.api_prefix)
 app.include_router(sources_router, prefix=settings.api_prefix)
 app.include_router(scans_router, prefix=settings.api_prefix)
 app.include_router(movies_router, prefix=settings.api_prefix)
+app.include_router(inventory_records_router, prefix=settings.api_prefix)
 app.include_router(probes_router, prefix=settings.api_prefix)
 
 
