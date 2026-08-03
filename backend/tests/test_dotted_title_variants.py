@@ -10,3 +10,4 @@ def test_additional_dotted_title_variants_preserve_the_full_title():
         2009,
     )
     assert clean_title("WALL.E (2008).mkv")[:2] == ("WALL E", 2008)
+    assert clean_title("S.W.A.T. (2003).mp4")[:2] == ("S W A T", 2003)
