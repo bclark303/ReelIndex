@@ -48,6 +48,11 @@ def apply_identity_repair() -> None:
     def repaired_init(self: core.LibraryIdentityIndex, db: Any) -> None:
         original_init(self, db)
         self.file_key_candidates: dict[str, list[MediaFile]] = defaultdict(list)
+        self.legacy_source_movies: dict[tuple[str, str], Movie] = {}
+        movies = db.scalars(select(Movie)).all()
+        for movie in movies:
+            if movie.source_id and movie.source_movie_id:
+                self.legacy_source_movies[(movie.source_id, str(movie.source_movie_id))] = movie
         files = db.scalars(
             select(MediaFile).options(
                 selectinload(MediaFile.movie),
@@ -70,9 +75,13 @@ def apply_identity_repair() -> None:
         source_id: str,
         candidate: Any,
     ) -> tuple[Movie | None, Any | None]:
-        source_link = self.source_movies.get((source_id, str(candidate.source_movie_id)))
+        source_key = (source_id, str(candidate.source_movie_id))
+        source_link = self.source_movies.get(source_key)
+        legacy_movie = self.legacy_source_movies.get(source_key)
         if source_link and core.content_identity_compatible(candidate, source_link.movie):
             return source_link.movie, source_link
+        if legacy_movie and core.content_identity_compatible(candidate, legacy_movie):
+            return legacy_movie, source_link
 
         metadata = dict(getattr(candidate, "metadata", {}) or {})
         keys = core.movie_identity_keys(
@@ -112,11 +121,13 @@ def apply_identity_repair() -> None:
             if movie is not None:
                 return movie, None
 
-        # Exact source aliases remain authoritative when no better compatible
-        # canonical record exists. This preserves manual metadata and avoids
-        # inserting a duplicate row with the same legacy source identity.
+        # Exact legacy identities remain authoritative when no better canonical
+        # record exists. This preserves manual metadata and prevents an insert
+        # from violating the legacy (source_id, source_movie_id) unique key.
         if source_link:
             return source_link.movie, source_link
+        if legacy_movie:
+            return legacy_movie, None
         return None, None
 
     def repaired_ensure_movie_link(
@@ -186,6 +197,10 @@ def apply_identity_repair() -> None:
             if not remaining and _is_live(old_file):
                 self.db.delete(old_file)
                 self.db.flush()
+                # The row is gone and no later scan operation needs this ORM
+                # instance. Detaching it avoids a stale expired object trying to
+                # reload a deleted row after commit.
+                self.db.expunge(old_file)
         return link
 
     cls.__init__ = repaired_init
