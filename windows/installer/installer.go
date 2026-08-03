@@ -18,8 +18,8 @@ import (
 	"unsafe"
 )
 
-const appVersion = "1.4.9"
-const packageVersion = "1.4.9.0"
+const appVersion = "1.4.10"
+const packageVersion = "1.4.10.0"
 
 //go:embed payload.zip
 var payload []byte

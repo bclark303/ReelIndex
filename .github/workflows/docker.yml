@@ -51,7 +51,7 @@ jobs:
             reelindex:smoke
       - name: Validate health, schema, tools, and shared UI
         run: |
-          rm -f health.json scans.json stats.json
+          rm -f health.json scans.json stats.json openapi.json
           healthy=false
           for attempt in {1..75}; do
             running="$(docker inspect --format '{{.State.Running}}' reelindex-smoke 2>/dev/null || true)"
@@ -76,19 +76,23 @@ jobs:
           fi
           curl --fail --silent --show-error --output scans.json http://127.0.0.1:18080/api/scans
           curl --fail --silent --show-error --output stats.json http://127.0.0.1:18080/api/stats
+          curl --fail --silent --show-error --output openapi.json http://127.0.0.1:18080/openapi.json
           python - <<'PY'
           import json
           health = json.load(open('health.json', encoding='utf-8'))
           scans = json.load(open('scans.json', encoding='utf-8'))
           stats = json.load(open('stats.json', encoding='utf-8'))
+          openapi = json.load(open('openapi.json', encoding='utf-8'))
           assert health['status'] == 'ok', health
-          assert health['version'] == '1.4.9', health
+          assert health['version'] == '1.4.10', health
           assert health['edition'] == 'Docker / Unraid', health
           assert isinstance(scans, list), scans
           assert isinstance(stats, dict), stats
+          assert 'delete' in openapi['paths']['/api/movies/{movie_id}'], openapi['paths'].keys()
           PY
           docker exec reelindex-smoke python -c "import sqlite3; db=sqlite3.connect('/data/reelindex.db'); tables={row[0] for row in db.execute(\"select name from sqlite_master where type='table'\")}; required={'sources','movies','movie_sources','media_files','media_file_sources','scan_runs'}; missing=required-tables; assert not missing, missing; mode=db.execute('pragma journal_mode').fetchone()[0].lower(); assert mode == 'delete', mode"
-          curl --fail --silent --show-error http://127.0.0.1:18080/ | grep -q 'ReelIndex 1.4.9'
+          curl --fail --silent --show-error http://127.0.0.1:18080/ | grep -q 'ReelIndex 1.4.10'
+          curl --fail --silent --show-error http://127.0.0.1:18080/record-delete.js | grep -q 'Delete inventory record'
           docker exec reelindex-smoke ffprobe -version
           docker exec reelindex-smoke mediainfo --Version
           test -f "${RUNNER_TEMP}/reelindex-data/reelindex.db"
