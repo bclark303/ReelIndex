@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "artifact": "ReelIndex-Windows-Setup-v1.4.10.0.exe",
+  "artifact_sha256": "e0349be3033bc497b247566d7f2e85d529e02fb5e89c6e5b47fe84ca3aad03b9",
+  "application_version": "1.4.10",
+  "package_version": "1.4.10.0",
+  "scan_result": "clean",
+  "scan_type": "Microsoft Defender custom scan of unpacked payload and final executable",
+  "scan_completed_utc": "2026-08-03T21:32:02.6287579Z",
+  "defender_product_version": "4.18.26060.3008",
+  "defender_engine_version": "1.1.26060.3008",
+  "defender_signature_version": "1.455.493.0",
+  "defender_signature_updated_utc": "2026-08-03T15:09:57.0000000Z",
+  "workflow_repository": "bclark303/ReelIndex",
+  "workflow_run_id": "30854838871",
+  "workflow_commit": "d4940df5917760083e369e8c7c0ac3ab0003d9c6"
+}

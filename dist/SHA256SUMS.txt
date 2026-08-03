@@ -10,3 +10,6 @@ aac74aa9bb41269a19cca9d2c162752cbc7a14f3733a4c254fb8c9a7f0afe066  ReelIndex-Wind
 5cec6285c837019ec98ff27240094fea9330779351aaa0d4202b2f4ce4d712e3  ReelIndex-Windows-Setup-v1.4.9.0.exe
 47ad7dd8c4260af65783b36ea5db9e07054b86cdb41af36a5f79b275fb806560  ReelIndex-Windows-Setup-v1.4.9.0.defender.json
 
+e0349be3033bc497b247566d7f2e85d529e02fb5e89c6e5b47fe84ca3aad03b9  ReelIndex-Windows-Setup-v1.4.10.0.exe
+c37b09e3d7da0a68bb558d751f03426a6349ceca7368da816e8071ec76e0ebb6  ReelIndex-Windows-Setup-v1.4.10.0.defender.json
+
