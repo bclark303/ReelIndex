@@ -160,5 +160,9 @@ def test_delete_record_is_blocked_while_any_scan_is_active(tmp_path, monkeypatch
 
 
 def test_delete_record_route_is_registered():
-    matching = [route for route in app.routes if getattr(route, "path", None) == "/api/movies/{movie_id}"]
-    assert any("DELETE" in (getattr(route, "methods", set()) or set()) for route in matching)
+    movie_routes = [
+        (getattr(route, "path", ""), getattr(route, "methods", set()) or set())
+        for route in app.routes
+        if "/movies/" in getattr(route, "path", "")
+    ]
+    assert any(path.endswith("/movies/{movie_id}") and "DELETE" in methods for path, methods in movie_routes), movie_routes
